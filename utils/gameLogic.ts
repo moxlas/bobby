@@ -1,5 +1,5 @@
 import { Card, GameState, Player, PlayerMove, GameOptions, DEFAULT_OPTIONS } from '../types/game';
-import { createDeck, shuffleDeck, cutDeck, dealCards, findNineOfDiamonds } from './deckUtils';
+import { createDeck, shuffleDeck, cutDeck, dealCards, findNineOfDiamonds, hasFourOfSameValue } from './deckUtils';
 
 export interface PlayerSetup {
   name: string;
@@ -306,7 +306,6 @@ export function getValidMoves(hand: Card[], pile: Card[]): { canPlay: boolean; c
   
   const topCard = pile[pile.length - 1];
   const hasValidCard = hand.some(c => c.value >= topCard.value);
-  const { hasFourOfSameValue } = require('./deckUtils');
   const fourOfKindValue = hasFourOfSameValue(hand);
   
   return {
