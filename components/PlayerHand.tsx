@@ -1,6 +1,7 @@
 import React from 'react';
 import { Card as CardType } from '../types/game';
 import { Card } from './Card';
+import { sortHand } from '../utils/deckUtils';
 
 interface PlayerHandProps {
   hand: CardType[];
@@ -10,9 +11,12 @@ interface PlayerHandProps {
 }
 
 export function PlayerHand({ hand, selectedCards, onCardSelect, disabled }: PlayerHandProps) {
+  // Sort hand by value then suit before displaying
+  const sortedHand = sortHand(hand);
+  
   return (
     <div className="flex flex-wrap gap-2 justify-center max-w-5xl mx-auto">
-      {hand.map((card) => (
+      {sortedHand.map((card) => (
         <Card
           key={card.id}
           card={{ ...card, faceUp: true }}
