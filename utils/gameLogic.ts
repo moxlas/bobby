@@ -44,7 +44,15 @@ export function initializeGame(playerSetups: PlayerSetup[], options: GameOptions
     direction: 'clockwise',
     finishOrder: [],
     loser: null,
-    moveHistory: [],
+    moveHistory: [{
+      id: '0',
+      type: 'play',
+      playerId: startingPlayerIndex,
+      playerName: players[startingPlayerIndex].name,
+      cards: [{ ...nineOfDiamonds, faceUp: true }],
+      timestamp: Date.now(),
+      turnNumber: 0
+    }],
     gameStartTime: Date.now(),
     pausedTime: null,
     totalPausedTime: 0,
@@ -94,6 +102,7 @@ export function validatePlay(cards: Card[], pile: Card[], isFirstMove: boolean, 
         return { valid: true, continueTurn: true };
       }
       if (cards.length === 1) {
+        // Single 9 on 9 of diamonds - turn ends immediately
         return { valid: true, continueTurn: false };
       }
       return { valid: false, error: 'Invalid number of nine cards' };
