@@ -31,8 +31,8 @@ function getCardDisplayName(card: CardType): string {
   return `${valueStr}${suitEmoji}`;
 }
 
-function getCardColor(suit: string): string {
-  return suit === 'hearts' || suit.suit === 'diamonds' ? 'text-red-400' : 'text-gray-200';
+function getCardColorClass(suit: string): string {
+  return suit === 'hearts' || suit === 'diamonds' ? 'text-red-600' : 'text-slate-900';
 }
 
 export function GameBoard({ 
@@ -67,7 +67,7 @@ export function GameBoard({
     gameStateRef.current = gameState;
   });
 
-  // Scroll history to top when new moves are added (newest is at top)
+  // Scroll history to top when new moves are added
   useEffect(() => {
     if (showHistory && historyContainerRef.current) {
       historyContainerRef.current.scrollTop = 0;
@@ -153,7 +153,7 @@ export function GameBoard({
         let nextIndex = (state.currentPlayerIndex + 1) % state.players.length;
         let attempts = 0;
         while (state.players[nextIndex].hasFinished && attempts < state.players.length) {
-          nextIndex = (nextPlayerIndex + 1) % state.players.length;
+          nextIndex = (nextIndex + 1) % state.players.length;
           attempts++;
         }
         
@@ -333,7 +333,6 @@ export function GameBoard({
         <div className="bg-emerald-800 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
           <h2 className="text-2xl sm:text-3xl font-bold text-amber-300 mb-2">🎉 Game Over!</h2>
           
-          {/* Total game time */}
           <div className="flex items-center justify-center gap-2 mb-4 sm:mb-6">
             <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-300" />
             <span className="text-emerald-200 text-base sm:text-lg">Total Time: {formatTime(elapsedTime)}</span>
@@ -401,7 +400,6 @@ export function GameBoard({
             <h2 className="text-2xl sm:text-3xl font-bold text-amber-300">Game Paused</h2>
           </div>
           
-          {/* Timer display during pause */}
           <div className="flex items-center justify-center gap-2 mb-6 sm:mb-8">
             <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-emerald-300" />
             <span className="text-emerald-200 text-xl sm:text-2xl font-mono">{formatTime(elapsedTime)}</span>
@@ -495,7 +493,6 @@ export function GameBoard({
           <div className="text-emerald-300 text-xs font-medium uppercase tracking-wide mb-1 px-1">Players</div>
           {gameState.players.map((player: any) => {
             const isCurrent = player.id === currentPlayer?.id;
-            const isHuman = !player.isAI;
             
             return (
               <div 
@@ -560,7 +557,7 @@ export function GameBoard({
 
           {/* Continue turn banner - 4 Nines Start */}
           {gameState.canContinueTurn && isHumanTurn && isFourNinesStart && (
-            <div className="bg-gradient-to-r from-purple-600 to-purple-500 rounded-lg p-3 sm:p-4 border-2 border-purple-400 shadow-lg flex-shrink-0 w-full max-w-sm">
+            <div className="bg-purple-600 rounded-lg p-3 sm:p-4 border-2 border-purple-400 shadow-lg flex-shrink-0 w-full max-w-sm">
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-2xl">🃏</span>
                 <span className="text-white font-bold text-base sm:text-lg">Lucky Start!</span>
@@ -589,7 +586,7 @@ export function GameBoard({
 
           {/* Continue turn banner - Regular 4 of a kind */}
           {gameState.canContinueTurn && isHumanTurn && !isFourNinesStart && (
-            <div className="bg-gradient-to-r from-amber-600 to-amber-500 rounded-lg p-3 sm:p-4 border-2 border-amber-400 shadow-lg flex-shrink-0 w-full max-w-sm">
+            <div className="bg-amber-600 rounded-lg p-3 sm:p-4 border-2 border-amber-400 shadow-lg flex-shrink-0 w-full max-w-sm">
               <div className="flex items-center gap-2 mb-2">
                 <Zap className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-900" />
                 <span className="text-emerald-900 font-bold text-base sm:text-lg">Combo!</span>
@@ -695,7 +692,6 @@ export function GameBoard({
                 {gameState.moveHistory.length === 0 ? (
                   <p className="text-emerald-400 text-xs italic text-center py-4">No moves yet</p>
                 ) : (
-                  // Show newest moves at top
                   gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
                     <div 
                       key={move.id} 
@@ -733,34 +729,38 @@ export function GameBoard({
         </div>
       </div>
 
-      {/* Mobile: Bottom Section - Reorganized */}
+      {/* Mobile: Bottom Section */}
       <div className="lg:hidden bg-emerald-800 border-t border-emerald-600 flex-shrink-0">
-        {/* Player Hand - Above action buttons, wraps to multiple rows */}
+        {/* Player Hand */}
         {shouldShowHand && (
           <div className="border-b border-emerald-600 p-2 sm:p-3">
             <div className="text-center mb-1 sm:mb-2">
               <span className="text-emerald-300 text-xs sm:text-sm">Your Hand ({currentPlayer.hand.length} cards)</span>
             </div>
-            {/* Cards wrap to multiple rows instead of horizontal scroll */}
-            <div className="flex flex-wrap gap-1 justify-center">
+            {/* Cards with white backgrounds and proper suit colors */}
+            <div className="flex flex-wrap gap-1.5 justify-center">
               {currentPlayer.hand.map((card: CardType) => {
                 const isSelected = selectedCards.some(c => c.id === card.id);
+                const valueStr = card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value.toString();
+                const suitSymbol = card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠';
+                const isRed = card.suit === 'hearts' || card.suit === 'diamonds';
+                
                 return (
                   <button
                     key={card.id}
                     onClick={() => handleCardSelect(card)}
                     disabled={!isHumanTurn}
-                    className={`w-10 h-14 sm:w-12 sm:h-16 rounded-lg border-2 flex items-center justify-center text-sm sm:text-base font-bold transition-all ${
+                    className={`w-11 h-14 sm:w-12 sm:h-16 rounded-lg border-2 flex flex-col items-center justify-center text-sm sm:text-base font-bold transition-all shadow-sm ${
                       isSelected
-                        ? 'border-amber-400 bg-amber-500/20 scale-105'
-                        : 'border-emerald-500 bg-emerald-700 hover:bg-emerald-600'
+                        ? 'border-amber-400 bg-amber-50 scale-105 shadow-md'
+                        : 'border-slate-300 bg-white hover:border-slate-400 hover:shadow'
                     } ${!isHumanTurn ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
-                    <span className={getCardColor(card.suit)}>
-                      {card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value}
+                    <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} leading-none`}>
+                      {valueStr}
                     </span>
-                    <span className={`text-[10px] sm:text-xs ml-0.5 ${getCardColor(card.suit)}`}>
-                      {card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠'}
+                    <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} text-xs sm:text-sm mt-0.5`}>
+                      {suitSymbol}
                     </span>
                   </button>
                 );
@@ -769,11 +769,11 @@ export function GameBoard({
           </div>
         )}
 
-        {/* Action Buttons - Below hand with increased spacing */}
+        {/* Action Buttons */}
         {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
           <div className="p-2 sm:p-3 border-b border-emerald-600">
             {/* Main action buttons row */}
-            <div className="flex gap-2 justify-center mb-3">
+            <div className="flex gap-2 justify-center mb-2">
               <Button
                 onClick={handlePlayClick}
                 disabled={selectedCards.length === 0}
@@ -793,19 +793,21 @@ export function GameBoard({
               )}
             </div>
             
-            {/* Pause button - wider with more spacing above */}
-            <Button
-              onClick={onPauseGame}
-              variant="outline"
-              className="w-full bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 py-2.5 text-xs font-medium"
-            >
-              <Pause className="w-3.5 h-3.5 mr-2" />
-              Pause Game
-            </Button>
+            {/* Narrower Pause button - centered */}
+            <div className="flex justify-center">
+              <Button
+                onClick={onPauseGame}
+                variant="outline"
+                className="bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 py-1.5 px-3 text-[10px] font-medium"
+              >
+                <Pause className="w-3 h-3 mr-1" />
+                Pause
+              </Button>
+            </div>
           </div>
         )}
         
-        {/* Players List - Compact */}
+        {/* Players List */}
         <div className="p-2 sm:p-3 border-b border-emerald-600">
           <div className="text-emerald-300 text-[10px] sm:text-xs font-medium uppercase tracking-wide mb-1 sm:mb-2">Players</div>
           <div className="flex flex-wrap gap-1 sm:gap-2">
@@ -854,7 +856,6 @@ export function GameBoard({
               {gameState.moveHistory.length === 0 ? (
                 <p className="text-emerald-400 text-[10px] sm:text-xs italic">No moves yet</p>
               ) : (
-                // Show newest moves at top (reversed order) - scrolled to top
                 gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
                   <div 
                     key={move.id} 
@@ -908,7 +909,7 @@ export function GameBoard({
         </div>
       )}
 
-      {/* Confirm Popup */}
+      {/* Confirmation Popup */}
       {showConfirm && (
         <ConfirmPopup
           message={getConfirmMessage()}
