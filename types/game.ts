@@ -32,9 +32,13 @@ export interface PlayerMove {
 
 export type GamePhase = 'setup' | 'playing' | 'paused' | 'finished';
 
+export type AIDifficulty = 'easy' | 'medium' | 'hard';
+
 export interface GameOptions {
   allowFourNinesStart: boolean;
   allowTakeAllCards: boolean;
+  specialNineRule: boolean;
+  aiDifficulty: AIDifficulty;
 }
 
 export interface GameState {
@@ -58,4 +62,6 @@ export interface GameState {
 export const DEFAULT_OPTIONS: GameOptions = {
   allowFourNinesStart: true,
   allowTakeAllCards: true,
+  specialNineRule: true,
+  aiDifficulty: 'easy',
 };
