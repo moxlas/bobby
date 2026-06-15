@@ -463,11 +463,12 @@ export function GameBoard({
               <span className="text-white font-mono text-xs sm:text-lg">{formatTime(elapsedTime)}</span>
             </div>
             
+            {/* Top Pause button - ONLY visible on large screens (lg breakpoint = 1024px+) */}
             <Button
               onClick={onPauseGame}
               variant="outline"
               size="sm"
-              className="bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 hidden sm:flex"
+              className="bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 lg:flex hidden"
             >
               <Pause className="w-4 h-4 mr-1" />
               Pause
@@ -737,7 +738,7 @@ export function GameBoard({
             <div className="text-center mb-1 sm:mb-2">
               <span className="text-emerald-300 text-xs sm:text-sm">Your Hand ({currentPlayer.hand.length} cards)</span>
             </div>
-            {/* Cards with white backgrounds and proper suit colors */}
+            {/* Cards with white backgrounds and proper suit colors - INCREASED BY 20% AGAIN */}
             <div className="flex flex-wrap gap-1.5 justify-center">
               {currentPlayer.hand.map((card: CardType) => {
                 const isSelected = selectedCards.some(c => c.id === card.id);
@@ -750,7 +751,7 @@ export function GameBoard({
                     key={card.id}
                     onClick={() => handleCardSelect(card)}
                     disabled={!isHumanTurn}
-                    className={`w-11 h-14 sm:w-12 sm:h-16 rounded-lg border-2 flex flex-col items-center justify-center text-sm sm:text-base font-bold transition-all shadow-sm ${
+                    className={`w-14 h-18 sm:w-16 sm:h-20 rounded-lg border-2 flex flex-col items-center justify-center text-base sm:text-lg font-bold transition-all shadow-sm ${
                       isSelected
                         ? 'border-amber-400 bg-amber-50 scale-105 shadow-md'
                         : 'border-slate-300 bg-white hover:border-slate-400 hover:shadow'
@@ -759,7 +760,7 @@ export function GameBoard({
                     <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} leading-none`}>
                       {valueStr}
                     </span>
-                    <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} text-xs sm:text-sm mt-0.5`}>
+                    <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} text-sm sm:text-base mt-0.5`}>
                       {suitSymbol}
                     </span>
                   </button>
@@ -793,8 +794,8 @@ export function GameBoard({
               )}
             </div>
             
-            {/* Narrower Pause button - centered */}
-            <div className="flex justify-center">
+            {/* Bottom Pause button - ONLY visible on narrow screens (below lg breakpoint) */}
+            <div className="flex justify-center lg:hidden">
               <Button
                 onClick={onPauseGame}
                 variant="outline"
