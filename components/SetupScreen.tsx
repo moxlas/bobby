@@ -24,6 +24,7 @@ const GAME_RULES = [
 const AI_DIFFICULTY_OPTIONS: { value: AIDifficulty; label: string; description: string }[] = [
   { value: 'easy', label: 'Easy', description: 'AI plays simple moves, always ends turn after playing' },
   { value: 'medium', label: 'Medium', description: 'AI uses 4-of-a-kind and multi-9 moves strategically' },
+  { value: 'hard', label: 'Hard', description: 'AI calculates optimal moves, preserves high cards, seeks combos' },
 ];
 
 export function SetupScreen({ onStartGame }: SetupScreenProps) {
@@ -276,7 +277,7 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
               {/* AI Difficulty */}
               <div className="pt-2 border-t border-emerald-500">
                 <label className="text-sm font-medium text-emerald-300 mb-2 block">AI Difficulty</label>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
                   {AI_DIFFICULTY_OPTIONS.map((option) => (
                     <button
                       key={option.value}
