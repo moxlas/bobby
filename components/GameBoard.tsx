@@ -53,7 +53,7 @@ export function GameBoard({
   const [showTakeOptions, setShowTakeOptions] = useState(false);
   const [elapsedTime, setElapsedTime] = useState(0);
   const [showHistory, setShowHistory] = useState(true);
-  const historyEndRef = useRef<HTMLDivElement>(null);
+  const historyContainerRef = useRef<HTMLDivElement>(null);
 
   const onPlayCardsRef = useRef(onPlayCards);
   const onTakeCardsRef = useRef(onTakeCards);
@@ -67,10 +67,10 @@ export function GameBoard({
     gameStateRef.current = gameState;
   });
 
-  // Auto-scroll to bottom of history when new moves are added
+  // Scroll history to top when new moves are added (newest is at top)
   useEffect(() => {
-    if (showHistory && historyEndRef.current) {
-      historyEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (showHistory && historyContainerRef.current) {
+      historyContainerRef.current.scrollTop = 0;
     }
   }, [gameState.moveHistory, showHistory]);
 
@@ -488,72 +488,6 @@ export function GameBoard({
         </div>
       </div>
 
-      {/* Mobile: Player Hand (Fixed at top below header) */}
-      {shouldShowHand && (
-        <div className="lg:hidden bg-emerald-800 border-b border-emerald-600 p-2 sm:p-3 flex-shrink-0">
-          <div className="text-center mb-1 sm:mb-2">
-            <span className="text-emerald-300 text-xs sm:text-sm">Your Hand ({currentPlayer.hand.length} cards)</span>
-          </div>
-          <div className="overflow-x-auto pb-1 sm:pb-2 -mx-2 px-2">
-            <div className="flex gap-1 justify-center flex-nowrap min-w-max">
-              {currentPlayer.hand.map((card: CardType) => {
-                const isSelected = selectedCards.some(c => c.id === card.id);
-                return (
-                  <button
-                    key={card.id}
-                    onClick={() => handleCardSelect(card)}
-                    disabled={!isHumanTurn}
-                    className={`flex-shrink-0 w-10 h-14 sm:w-12 sm:h-16 rounded-lg border-2 flex items-center justify-center text-sm sm:text-base font-bold transition-all ${
-                      isSelected
-                        ? 'border-amber-400 bg-amber-500/20 scale-105'
-                        : 'border-emerald-500 bg-emerald-700 hover:bg-emerald-600'
-                    } ${!isHumanTurn ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <span className={getCardColor(card.suit)}>
-                      {card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value}
-                    </span>
-                    <span className={`text-[10px] sm:text-xs ml-0.5 ${getCardColor(card.suit)}`}>
-                      {card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠'}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          
-          {/* Mobile: Action buttons integrated into hand area */}
-          {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
-            <div className="flex gap-2 justify-center mt-2 pt-2 border-t border-emerald-600">
-              <Button
-                onClick={handlePlayClick}
-                disabled={selectedCards.length === 0}
-                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-3 py-1.5 text-xs"
-              >
-                Play ({selectedCards.length})
-              </Button>
-              
-              {canTakeCards && (
-                <Button
-                  onClick={handleTakeClick}
-                  variant="outline"
-                  className="bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 px-3 py-1.5 text-xs"
-                >
-                  Take
-                </Button>
-              )}
-              
-              <Button
-                onClick={onPauseGame}
-                variant="outline"
-                className="bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 px-2 py-1.5"
-              >
-                <Pause className="w-3 h-3" />
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Main game area - Desktop layout */}
       <div className="flex-1 flex flex-col lg:flex-row gap-2 sm:gap-4 p-2 sm:p-4 max-w-6xl mx-auto w-full overflow-hidden">
         {/* Left sidebar - All Players (Desktop) */}
@@ -757,10 +691,11 @@ export function GameBoard({
             </button>
             
             {showHistory && (
-              <div className="flex-1 overflow-y-auto p-2 space-y-1 min-h-0">
+              <div ref={historyContainerRef} className="flex-1 overflow-y-auto p-2 space-y-1 min-h-0">
                 {gameState.moveHistory.length === 0 ? (
                   <p className="text-emerald-400 text-xs italic text-center py-4">No moves yet</p>
                 ) : (
+                  // Show newest moves at top
                   gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
                     <div 
                       key={move.id} 
@@ -792,17 +727,86 @@ export function GameBoard({
                     </div>
                   ))
                 )}
-                <div ref={historyEndRef} />
               </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Mobile: Game Info & History */}
-      <div className="lg:hidden bg-emerald-800 border-t border-emerald-600 p-2 sm:p-4 flex-shrink-0">
+      {/* Mobile: Bottom Section - Reorganized */}
+      <div className="lg:hidden bg-emerald-800 border-t border-emerald-600 flex-shrink-0">
+        {/* Player Hand - Above action buttons, wraps to multiple rows */}
+        {shouldShowHand && (
+          <div className="border-b border-emerald-600 p-2 sm:p-3">
+            <div className="text-center mb-1 sm:mb-2">
+              <span className="text-emerald-300 text-xs sm:text-sm">Your Hand ({currentPlayer.hand.length} cards)</span>
+            </div>
+            {/* Cards wrap to multiple rows instead of horizontal scroll */}
+            <div className="flex flex-wrap gap-1 justify-center">
+              {currentPlayer.hand.map((card: CardType) => {
+                const isSelected = selectedCards.some(c => c.id === card.id);
+                return (
+                  <button
+                    key={card.id}
+                    onClick={() => handleCardSelect(card)}
+                    disabled={!isHumanTurn}
+                    className={`w-10 h-14 sm:w-12 sm:h-16 rounded-lg border-2 flex items-center justify-center text-sm sm:text-base font-bold transition-all ${
+                      isSelected
+                        ? 'border-amber-400 bg-amber-500/20 scale-105'
+                        : 'border-emerald-500 bg-emerald-700 hover:bg-emerald-600'
+                    } ${!isHumanTurn ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className={getCardColor(card.suit)}>
+                      {card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value}
+                    </span>
+                    <span className={`text-[10px] sm:text-xs ml-0.5 ${getCardColor(card.suit)}`}>
+                      {card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Action Buttons - Below hand with increased spacing */}
+        {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
+          <div className="p-2 sm:p-3 border-b border-emerald-600">
+            {/* Main action buttons row */}
+            <div className="flex gap-2 justify-center mb-3">
+              <Button
+                onClick={handlePlayClick}
+                disabled={selectedCards.length === 0}
+                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-4 py-2 text-xs flex-1 max-w-24"
+              >
+                Play ({selectedCards.length})
+              </Button>
+              
+              {canTakeCards && (
+                <Button
+                  onClick={handleTakeClick}
+                  variant="outline"
+                  className="bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 px-4 py-2 text-xs flex-1 max-w-24"
+                >
+                  Take
+                </Button>
+              )}
+            </div>
+            
+            {/* Pause button - wider with more spacing above */}
+            <Button
+              onClick={onPauseGame}
+              variant="outline"
+              className="w-full bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 py-2.5 text-xs font-medium"
+            >
+              <Pause className="w-3.5 h-3.5 mr-2" />
+              Pause Game
+            </Button>
+          </div>
+        )}
+        
         {/* Players List - Compact */}
-        <div className="mb-3 sm:mb-4">
+        <div className="p-2 sm:p-3 border-b border-emerald-600">
           <div className="text-emerald-300 text-[10px] sm:text-xs font-medium uppercase tracking-wide mb-1 sm:mb-2">Players</div>
           <div className="flex flex-wrap gap-1 sm:gap-2">
             {gameState.players.map((player: any) => {
@@ -828,61 +832,63 @@ export function GameBoard({
         </div>
 
         {/* Move History Toggle */}
-        <button
-          onClick={() => setShowHistory(!showHistory)}
-          className="flex items-center justify-between w-full"
-        >
-          <div className="flex items-center gap-1 sm:gap-2">
-            <History className="w-3 h-3 sm:w-4 sm:h-4 text-amber-400" />
-            <span className="text-white font-medium text-xs sm:text-sm">Move History</span>
-            <span className="text-emerald-400 text-[10px] sm:text-xs">({gameState.moveHistory.length})</span>
-          </div>
-          {showHistory ? (
-            <ChevronUp className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
-          ) : (
-            <ChevronDown className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
-          )}
-        </button>
-        
-        {showHistory && (
-          <div className="mt-2 sm:mt-3 space-y-1 max-h-24 sm:max-h-32 overflow-y-auto">
-            {gameState.moveHistory.length === 0 ? (
-              <p className="text-emerald-400 text-[10px] sm:text-xs italic">No moves yet</p>
+        <div className="p-2 sm:p-3">
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className="flex items-center justify-between w-full"
+          >
+            <div className="flex items-center gap-1 sm:gap-2">
+              <History className="w-3 h-3 sm:w-4 sm:h-4 text-amber-400" />
+              <span className="text-white font-medium text-xs sm:text-sm">Move History</span>
+              <span className="text-emerald-400 text-[10px] sm:text-xs">({gameState.moveHistory.length})</span>
+            </div>
+            {showHistory ? (
+              <ChevronUp className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
             ) : (
-              gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
-                <div 
-                  key={move.id} 
-                  className={`text-[10px] sm:text-xs p-1.5 sm:p-2 rounded ${
-                    move.type === 'play' 
-                      ? 'bg-emerald-700/50' 
-                      : 'bg-amber-900/30'
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-0.5">
-                    <span className={`font-medium ${move.type === 'play' ? 'text-amber-300' : 'text-emerald-300'}`}>
-                      {move.playerName}
-                    </span>
-                    <span className="text-emerald-500 text-[8px] sm:text-[10px]">T{move.turnNumber}</span>
-                  </div>
-                  <div className="text-emerald-200 truncate">
-                    {move.type === 'play' ? (
-                      <span className="flex items-center gap-1">
-                        <span className="text-emerald-400">→</span>
-                        {move.cards.map(c => getCardDisplayName(c)).join(' ')}
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1">
-                        <span className="text-amber-400">↑</span>
-                        Took {move.cards.length}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))
+              <ChevronDown className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
             )}
-            <div ref={historyEndRef} />
-          </div>
-        )}
+          </button>
+          
+          {showHistory && (
+            <div ref={historyContainerRef} className="mt-2 sm:mt-3 space-y-1 max-h-24 sm:max-h-32 overflow-y-auto">
+              {gameState.moveHistory.length === 0 ? (
+                <p className="text-emerald-400 text-[10px] sm:text-xs italic">No moves yet</p>
+              ) : (
+                // Show newest moves at top (reversed order) - scrolled to top
+                gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
+                  <div 
+                    key={move.id} 
+                    className={`text-[10px] sm:text-xs p-1.5 sm:p-2 rounded ${
+                      move.type === 'play' 
+                        ? 'bg-emerald-700/50' 
+                        : 'bg-amber-900/30'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-0.5">
+                      <span className={`font-medium ${move.type === 'play' ? 'text-amber-300' : 'text-emerald-300'}`}>
+                        {move.playerName}
+                      </span>
+                      <span className="text-emerald-500 text-[8px] sm:text-[10px]">T{move.turnNumber}</span>
+                    </div>
+                    <div className="text-emerald-200 truncate">
+                      {move.type === 'play' ? (
+                        <span className="flex items-center gap-1">
+                          <span className="text-emerald-400">→</span>
+                          {move.cards.map(c => getCardDisplayName(c)).join(' ')}
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <span className="text-amber-400">↑</span>
+                          Took {move.cards.length}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Desktop: Player Hand at bottom */}
