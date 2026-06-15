@@ -234,11 +234,32 @@ function App() {
       const newPile = [...prev.pile];
       const newHand = [...player.hand];
       
-      // Take cards from pile (but not 9 of diamonds)
-      const cardsToTake = newPile.splice(1, count);
-      newHand.push(...cardsToTake);
+      // ============================================================
+      // FIX: Take cards from the TOP of the pile (end of array)
+      // ============================================================
+      // Pile structure: [9d, 9s, 10d, 10s, 10h, Jd]
+      // - pile[0] = 9d (bottom, always stays)
+      // - pile[pile.length-1] = Jd (top, most recently played)
+      // 
+      // When taking 3 cards, we want: [10s, 10h, Jd]
+      // These are at indices: 3, 4, 5 (the last 3 cards)
+      // 
+      // Using splice(-count, count):
+      // - Negative index starts from the END of the array
+      // - splice(-3, 3) removes and returns the last 3 elements
+      // ============================================================
       
-      // Sort hand
+      // Calculate how many cards we can actually take
+      // (don't take the 9 of diamonds at index 0)
+      const availableCards = newPile.length - 1;
+      const actualCount = Math.min(count, availableCards);
+      
+      // Take from the TOP of pile (end of array)
+      // This correctly takes the most recently played cards
+      const cardsToTake = newPile.splice(-actualCount, actualCount);
+      
+      // Add taken cards to player's hand and sort
+      newHand.push(...cardsToTake);
       newHand.sort((a, b) => a.value - b.value);
       
       // Update player
