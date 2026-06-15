@@ -1,5 +1,5 @@
 import { Card, GameState, Player, PlayerMove, GameOptions, DEFAULT_OPTIONS } from '../types/game';
-import { createDeck, shuffleDeck, cutDeck, dealCards, findNineOfDiamonds, hasFourOfSameValue } from './deckUtils';
+import { createDeck, shuffleDeck, cutDeck, dealCards, findNineOfDiamonds, hasFourOfSameValue, sortHand } from './deckUtils';
 
 export interface PlayerSetup {
   name: string;
@@ -80,6 +80,7 @@ export function validatePlay(cards: Card[], pile: Card[], isFirstMove: boolean, 
   
   const topCard = pile[pile.length - 1];
   
+  // Special case: playing on 9 of diamonds at start
   if (isFirstMove && pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9) {
     const allNines = cards.every(c => c.value === 9);
     if (allNines) {
@@ -99,6 +100,7 @@ export function validatePlay(cards: Card[], pile: Card[], isFirstMove: boolean, 
     }
   }
   
+  // Regular 9 on 9 play
   if (firstValue === 9 && topCard.value === 9) {
     if (cards.length !== 1) {
       return { valid: false, error: 'You can only play a single 9 card on other 9s' };
@@ -106,6 +108,7 @@ export function validatePlay(cards: Card[], pile: Card[], isFirstMove: boolean, 
     return { valid: true, continueTurn: false };
   }
   
+  // 2 or 3 cards not allowed (except special cases above)
   if (cards.length === 2 || cards.length === 3) {
     return { valid: false, error: 'You can only play 1 card or 4 cards of the same value' };
   }
@@ -114,12 +117,14 @@ export function validatePlay(cards: Card[], pile: Card[], isFirstMove: boolean, 
     return { valid: false, error: 'Cannot play more than 4 cards at once' };
   }
   
+  // Single card validation
   if (cards.length === 1) {
     if (firstValue < topCard.value) {
       return { valid: false, error: 'Card value must be equal or higher than top card' };
     }
   }
   
+  // Four of a kind - always valid if same value
   if (cards.length === 4) {
     return { valid: true, continueTurn: true };
   }
@@ -131,6 +136,7 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
   const newPlayers = [...state.players];
   const player = newPlayers[playerId];
   
+  // Empty play = pass turn
   if (cards.length === 0) {
     const nextIndex = getNextPlayerIndex(state.currentPlayerIndex, newPlayers);
     newPlayers[state.currentPlayerIndex].isCurrentTurn = false;
@@ -145,13 +151,15 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
     };
   }
   
-  player.hand = player.hand.filter(c => !cards.find(pc => pc.id === c.id));
+  // Remove played cards from hand and sort remaining
+  player.hand = sortHand(player.hand.filter(c => !cards.find(pc => pc.id === c.id)));
   const newPile = [...state.pile, ...cards.map(c => ({ ...c, faceUp: true }))];
   
   const elapsedTime = state.gameStartTime 
     ? (Date.now() - state.gameStartTime) / 1000 - state.totalPausedTime 
     : 0;
   
+  // Record move
   const move: PlayerMove = {
     id: `move-${Date.now()}-${Math.random()}`,
     playerId,
@@ -163,6 +171,7 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
   };
   const newMoveHistory = [...state.moveHistory, move];
   
+  // Check if player finished
   if (player.hand.length === 0) {
     player.hasFinished = true;
     player.finishPosition = state.finishOrder.length + 1;
@@ -171,6 +180,7 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
     const newFinishOrder = [...state.finishOrder, { ...player }];
     const activePlayers = newPlayers.filter(p => !p.hasFinished);
     
+    // Check for game over (last player is loser)
     if (activePlayers.length === 1) {
       const loser = activePlayers[0];
       loser.hasFinished = true;
@@ -189,6 +199,7 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
       };
     }
     
+    // Move to next player
     const nextIndex = getNextPlayerIndex(state.currentPlayerIndex, newPlayers);
     newPlayers[state.currentPlayerIndex].isCurrentTurn = false;
     newPlayers[nextIndex].isCurrentTurn = true;
@@ -205,6 +216,7 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
     };
   }
   
+  // Continue turn (after 4 of a kind)
   if (continueTurn) {
     return {
       ...state,
@@ -215,6 +227,7 @@ export function playCards(state: GameState, playerId: number, cards: Card[], con
     };
   }
   
+  // Normal turn end
   const nextIndex = getNextPlayerIndex(state.currentPlayerIndex, newPlayers);
   newPlayers[state.currentPlayerIndex].isCurrentTurn = false;
   newPlayers[nextIndex].isCurrentTurn = true;
@@ -251,7 +264,8 @@ export function takeCards(state: GameState, playerId: number, count: number): Ga
   const newPile = [...state.pile];
   
   const cardsToTake = newPile.splice(-count, count);
-  player.hand = [...player.hand, ...cardsToTake];
+  // Sort hand after adding new cards
+  player.hand = sortHand([...player.hand, ...cardsToTake]);
   
   const move: PlayerMove = {
     id: `move-${Date.now()}-${Math.random()}`,
@@ -280,7 +294,7 @@ export function takeCards(state: GameState, playerId: number, count: number): Ga
 }
 
 export function getTakeOptions(pile: Card[], options: GameOptions): { canTake3: boolean; canTakeAll: boolean; take3Count: number; takeAllCount: number } {
-  const availableCards = pile.length - 1;
+  const availableCards = pile.length - 1; // Exclude 9 of diamonds at bottom
   
   return {
     canTake3: availableCards >= 1,
