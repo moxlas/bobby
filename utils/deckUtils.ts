@@ -1,4 +1,12 @@
-import { Card, Suit } from '../types/game';
+import { Card, Suit, Value } from '../types/game';
+
+// Suit order for sorting: clubs < diamonds < hearts < spades
+const SUIT_ORDER: Record<Suit, number> = {
+  clubs: 0,
+  diamonds: 1,
+  hearts: 2,
+  spades: 3,
+};
 
 export function createDeck(): Card[] {
   const suits: Suit[] = ['hearts', 'diamonds', 'clubs', 'spades'];
@@ -34,6 +42,17 @@ export function cutDeck(deck: Card[]): Card[] {
   return [...deck.slice(cutPoint), ...deck.slice(0, cutPoint)];
 }
 
+export function sortHand(hand: Card[]): Card[] {
+  return [...hand].sort((a, b) => {
+    // First sort by value (ascending)
+    if (a.value !== b.value) {
+      return a.value - b.value;
+    }
+    // Then by suit order
+    return SUIT_ORDER[a.suit] - SUIT_ORDER[b.suit];
+  });
+}
+
 export function dealCards(deck: Card[], playerCount: number): Card[][] {
   const hands: Card[][] = Array.from({ length: playerCount }, () => []);
   
@@ -42,7 +61,8 @@ export function dealCards(deck: Card[], playerCount: number): Card[][] {
     hands[playerIndex].push(card);
   });
   
-  return hands;
+  // Sort all hands after dealing
+  return hands.map(hand => sortHand(hand));
 }
 
 export function findNineOfDiamonds(hand: Card[]): Card | undefined {
@@ -65,4 +85,10 @@ export function hasFourOfSameValue(hand: Card[]): number | null {
 
 export function getCardsOfSameValue(hand: Card[], value: number): Card[] {
   return hand.filter(c => c.value === value);
+}
+
+export function getCardDisplayName(card: Card): string {
+  const valueStr = card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value.toString();
+  const suitEmoji = card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠';
+  return `${valueStr}${suitEmoji}`;
 }
