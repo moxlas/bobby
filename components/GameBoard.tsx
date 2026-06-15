@@ -32,7 +32,7 @@ function getCardDisplayName(card: CardType): string {
 }
 
 function getCardColor(suit: string): string {
-  return suit === 'hearts' || suit === 'diamonds' ? 'text-red-400' : 'text-gray-200';
+  return suit === 'hearts' || suit.suit === 'diamonds' ? 'text-red-400' : 'text-gray-200';
 }
 
 export function GameBoard({ 
@@ -128,6 +128,11 @@ export function GameBoard({
   const takeOptions = getTakeOptions(pile, options);
   const validMoves = isPlayerTurn ? getValidMoves(currentPlayer.hand, pile) : { canPlay: false, canTake: false };
 
+  // Check if this is the special 4 nines start scenario
+  const isFourNinesStart = gameState.canContinueTurn && 
+    isFirstMove && 
+    currentPlayer.hand.filter((c: CardType) => c.value === 9).length === 3;
+
   // AI turn logic
   useEffect(() => {
     if (gameState.phase !== 'playing') {
@@ -148,7 +153,7 @@ export function GameBoard({
         let nextIndex = (state.currentPlayerIndex + 1) % state.players.length;
         let attempts = 0;
         while (state.players[nextIndex].hasFinished && attempts < state.players.length) {
-          nextIndex = (nextIndex + 1) % state.players.length;
+          nextIndex = (nextPlayerIndex + 1) % state.players.length;
           attempts++;
         }
         
@@ -325,49 +330,49 @@ export function GameBoard({
   if (gameState.phase === 'finished') {
     return (
       <div className="min-h-screen bg-emerald-900 flex items-center justify-center p-4">
-        <div className="bg-emerald-800 rounded-2xl p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
-          <h2 className="text-3xl font-bold text-amber-300 mb-2">🎉 Game Over!</h2>
+        <div className="bg-emerald-800 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
+          <h2 className="text-2xl sm:text-3xl font-bold text-amber-300 mb-2">🎉 Game Over!</h2>
           
           {/* Total game time */}
-          <div className="flex items-center justify-center gap-2 mb-6">
-            <Clock className="w-5 h-5 text-emerald-300" />
-            <span className="text-emerald-200 text-lg">Total Time: {formatTime(elapsedTime)}</span>
+          <div className="flex items-center justify-center gap-2 mb-4 sm:mb-6">
+            <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-300" />
+            <span className="text-emerald-200 text-base sm:text-lg">Total Time: {formatTime(elapsedTime)}</span>
           </div>
           
-          <div className="space-y-4 mb-8">
-            <h3 className="text-lg text-emerald-200 font-semibold">Final Rankings:</h3>
+          <div className="space-y-2 sm:space-y-3 mb-6 sm:mb-8">
+            <h3 className="text-sm sm:text-base text-emerald-200 font-semibold">Final Rankings:</h3>
             {gameState.finishOrder.map((player: any, index: number) => (
               <div 
                 key={player.id}
-                className={`flex items-center justify-between p-3 rounded-lg ${
+                className={`flex items-center justify-between p-2 sm:p-3 rounded-lg text-sm ${
                   index === 0 ? 'bg-amber-500 text-emerald-900' :
                   index === gameState.finishOrder.length - 1 ? 'bg-red-500 text-white' :
                   'bg-emerald-600 text-white'
                 }`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 sm:gap-3">
                   <span className="font-medium">
                     {index + 1}. {player.name}
                   </span>
                   {index === gameState.finishOrder.length - 1 && (
-                    <span className="text-sm font-bold">💀 LOSER</span>
+                    <span className="text-xs font-bold">💀 LOSER</span>
                   )}
                   {index === 0 && (
-                    <span className="text-sm font-bold">👑 WINNER</span>
+                    <span className="text-xs font-bold">👑 WINNER</span>
                   )}
                 </div>
-                <div className="flex items-center gap-1 text-sm">
-                  <Clock className="w-4 h-4" />
+                <div className="flex items-center gap-1 text-xs sm:text-sm">
+                  <Clock className="w-3 h-3 sm:w-4 sm:h-4" />
                   <span>{formatTime(player.finishTime || 0)}</span>
                 </div>
               </div>
             ))}
           </div>
           
-          <div className="flex gap-4">
+          <div className="flex flex-col sm:flex-row gap-3">
             <Button
               onClick={onRestartGame}
-              className="flex-1 bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold"
+              className="flex-1 bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-sm sm:text-base"
             >
               <RotateCcw className="w-4 h-4 mr-2" />
               Play Again
@@ -375,7 +380,7 @@ export function GameBoard({
             <Button
               onClick={onNewGame}
               variant="outline"
-              className="flex-1 bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500"
+              className="flex-1 bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 text-sm sm:text-base"
             >
               <Home className="w-4 h-4 mr-2" />
               New Game
@@ -390,31 +395,31 @@ export function GameBoard({
   if (gameState.phase === 'paused') {
     return (
       <div className="min-h-screen bg-emerald-900 flex items-center justify-center p-4">
-        <div className="bg-emerald-800 rounded-2xl p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
-          <div className="flex items-center justify-center gap-3 mb-6">
-            <Pause className="w-8 h-8 text-amber-300" />
-            <h2 className="text-3xl font-bold text-amber-300">Game Paused</h2>
+        <div className="bg-emerald-800 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
+          <div className="flex items-center justify-center gap-2 sm:gap-3 mb-4 sm:mb-6">
+            <Pause className="w-6 h-6 sm:w-8 sm:h-8 text-amber-300" />
+            <h2 className="text-2xl sm:text-3xl font-bold text-amber-300">Game Paused</h2>
           </div>
           
           {/* Timer display during pause */}
-          <div className="flex items-center justify-center gap-2 mb-8">
-            <Clock className="w-6 h-6 text-emerald-300" />
-            <span className="text-emerald-200 text-2xl font-mono">{formatTime(elapsedTime)}</span>
+          <div className="flex items-center justify-center gap-2 mb-6 sm:mb-8">
+            <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-emerald-300" />
+            <span className="text-emerald-200 text-xl sm:text-2xl font-mono">{formatTime(elapsedTime)}</span>
           </div>
           
-          <div className="space-y-4">
+          <div className="space-y-3 sm:space-y-4">
             <Button
               onClick={onResumeGame}
-              className="w-full bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-lg py-6"
+              className="w-full bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-base sm:text-lg py-4 sm:py-6"
             >
-              <Play className="w-5 h-5 mr-2" />
+              <Play className="w-4 h-4 sm:w-5 sm:h-5 mr-2" />
               Resume Game
             </Button>
             
             <Button
               onClick={onRestartGame}
               variant="outline"
-              className="w-full bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500"
+              className="w-full bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 text-sm sm:text-base"
             >
               <RotateCcw className="w-4 h-4 mr-2" />
               Restart Game
@@ -423,7 +428,7 @@ export function GameBoard({
             <Button
               onClick={onNewGame}
               variant="outline"
-              className="w-full bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500"
+              className="w-full bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 text-sm sm:text-base"
             >
               <Home className="w-4 h-4 mr-2" />
               New Game
@@ -444,20 +449,20 @@ export function GameBoard({
   return (
     <div className="min-h-screen bg-emerald-900 flex flex-col">
       {/* Top bar */}
-      <div className="bg-emerald-800 border-b border-emerald-600 px-4 py-3 flex-shrink-0">
+      <div className="bg-emerald-800 border-b border-emerald-600 px-2 sm:px-4 py-2 sm:py-3 flex-shrink-0">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2 sm:gap-4">
-            <h1 className="text-lg sm:text-xl font-bold text-amber-300">🃏 The Bobby</h1>
-            <span className="text-emerald-300 text-xs sm:text-sm hidden sm:inline">
+          <div className="flex items-center gap-1 sm:gap-4">
+            <h1 className="text-base sm:text-xl font-bold text-amber-300">🃏 The Bobby</h1>
+            <span className="text-emerald-300 text-xs hidden sm:inline">
               Turn {gameState.turnNumber}
             </span>
           </div>
           
           {/* Timer display */}
-          <div className="flex items-center gap-2 sm:gap-4">
+          <div className="flex items-center gap-1 sm:gap-4">
             <div className="flex items-center gap-1 sm:gap-2 bg-emerald-700 px-2 sm:px-4 py-1 sm:py-2 rounded-lg">
-              <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-amber-300" />
-              <span className="text-white font-mono text-sm sm:text-lg">{formatTime(elapsedTime)}</span>
+              <Clock className="w-3 h-3 sm:w-5 sm:h-5 text-amber-300" />
+              <span className="text-white font-mono text-xs sm:text-lg">{formatTime(elapsedTime)}</span>
             </div>
             
             <Button
@@ -485,12 +490,12 @@ export function GameBoard({
 
       {/* Mobile: Player Hand (Fixed at top below header) */}
       {shouldShowHand && (
-        <div className="lg:hidden bg-emerald-800 border-b border-emerald-600 p-3 flex-shrink-0">
-          <div className="text-center mb-2">
-            <span className="text-emerald-300 text-sm">Your Hand ({currentPlayer.hand.length} cards)</span>
+        <div className="lg:hidden bg-emerald-800 border-b border-emerald-600 p-2 sm:p-3 flex-shrink-0">
+          <div className="text-center mb-1 sm:mb-2">
+            <span className="text-emerald-300 text-xs sm:text-sm">Your Hand ({currentPlayer.hand.length} cards)</span>
           </div>
-          <div className="overflow-x-auto pb-2">
-            <div className="flex gap-1 justify-center flex-wrap">
+          <div className="overflow-x-auto pb-1 sm:pb-2 -mx-2 px-2">
+            <div className="flex gap-1 justify-center flex-nowrap min-w-max">
               {currentPlayer.hand.map((card: CardType) => {
                 const isSelected = selectedCards.some(c => c.id === card.id);
                 return (
@@ -498,7 +503,7 @@ export function GameBoard({
                     key={card.id}
                     onClick={() => handleCardSelect(card)}
                     disabled={!isHumanTurn}
-                    className={`flex-shrink-0 w-12 h-16 sm:w-14 sm:h-20 rounded-lg border-2 flex items-center justify-center text-lg sm:text-xl font-bold transition-all ${
+                    className={`flex-shrink-0 w-10 h-14 sm:w-12 sm:h-16 rounded-lg border-2 flex items-center justify-center text-sm sm:text-base font-bold transition-all ${
                       isSelected
                         ? 'border-amber-400 bg-amber-500/20 scale-105'
                         : 'border-emerald-500 bg-emerald-700 hover:bg-emerald-600'
@@ -507,7 +512,7 @@ export function GameBoard({
                     <span className={getCardColor(card.suit)}>
                       {card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value}
                     </span>
-                    <span className={`text-xs ml-0.5 ${getCardColor(card.suit)}`}>
+                    <span className={`text-[10px] sm:text-xs ml-0.5 ${getCardColor(card.suit)}`}>
                       {card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠'}
                     </span>
                   </button>
@@ -515,11 +520,42 @@ export function GameBoard({
               })}
             </div>
           </div>
+          
+          {/* Mobile: Action buttons integrated into hand area */}
+          {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
+            <div className="flex gap-2 justify-center mt-2 pt-2 border-t border-emerald-600">
+              <Button
+                onClick={handlePlayClick}
+                disabled={selectedCards.length === 0}
+                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-3 py-1.5 text-xs"
+              >
+                Play ({selectedCards.length})
+              </Button>
+              
+              {canTakeCards && (
+                <Button
+                  onClick={handleTakeClick}
+                  variant="outline"
+                  className="bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 px-3 py-1.5 text-xs"
+                >
+                  Take
+                </Button>
+              )}
+              
+              <Button
+                onClick={onPauseGame}
+                variant="outline"
+                className="bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600 px-2 py-1.5"
+              >
+                <Pause className="w-3 h-3" />
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
       {/* Main game area - Desktop layout */}
-      <div className="flex-1 flex flex-col lg:flex-row gap-4 p-4 max-w-6xl mx-auto w-full overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row gap-2 sm:gap-4 p-2 sm:p-4 max-w-6xl mx-auto w-full overflow-hidden">
         {/* Left sidebar - All Players (Desktop) */}
         <div className="hidden lg:flex lg:w-44 flex-col gap-2 overflow-y-auto flex-shrink-0">
           <div className="text-emerald-300 text-xs font-medium uppercase tracking-wide mb-1 px-1">Players</div>
@@ -566,14 +602,14 @@ export function GameBoard({
         </div>
 
         {/* Center - Pile and actions */}
-        <div className="flex-1 flex flex-col items-center justify-start gap-4 overflow-y-auto">
+        <div className="flex-1 flex flex-col items-center justify-start gap-2 sm:gap-4 overflow-y-auto">
           {/* Current player indicator */}
           <div className="text-center flex-shrink-0">
-            <div className="flex items-center gap-2 justify-center mb-2">
-              <span className="text-emerald-300 text-sm">Current Turn:</span>
-              <span className="text-amber-300 font-bold text-lg">{currentPlayer?.name}</span>
-              {currentPlayer?.isAI && <span className="text-xs text-emerald-400">(AI)</span>}
-              {isAIThinking && <span className="text-amber-400 animate-pulse">Thinking...</span>}
+            <div className="flex items-center gap-1 sm:gap-2 justify-center mb-1 sm:mb-2">
+              <span className="text-emerald-300 text-xs sm:text-sm">Current Turn:</span>
+              <span className="text-amber-300 font-bold text-sm sm:text-lg">{currentPlayer?.name}</span>
+              {currentPlayer?.isAI && <span className="text-[10px] sm:text-xs text-emerald-400">(AI)</span>}
+              {isAIThinking && <span className="text-amber-400 text-xs sm:text-sm animate-pulse">Thinking...</span>}
             </div>
           </div>
 
@@ -582,34 +618,63 @@ export function GameBoard({
 
           {/* Error message */}
           {error && (
-            <div className="flex items-center gap-2 bg-red-500 text-white px-4 py-2 rounded-lg flex-shrink-0">
+            <div className="flex items-center gap-2 bg-red-500 text-white px-3 sm:px-4 py-2 rounded-lg flex-shrink-0 text-sm">
               <AlertCircle className="w-4 h-4" />
               {error}
             </div>
           )}
 
-          {/* Continue turn banner */}
-          {gameState.canContinueTurn && isHumanTurn && (
-            <div className="bg-gradient-to-r from-amber-600 to-amber-500 rounded-lg p-4 border-2 border-amber-400 shadow-lg animate-pulse flex-shrink-0">
+          {/* Continue turn banner - 4 Nines Start */}
+          {gameState.canContinueTurn && isHumanTurn && isFourNinesStart && (
+            <div className="bg-gradient-to-r from-purple-600 to-purple-500 rounded-lg p-3 sm:p-4 border-2 border-purple-400 shadow-lg flex-shrink-0 w-full max-w-sm">
               <div className="flex items-center gap-2 mb-2">
-                <Zap className="w-5 h-5 text-emerald-900" />
-                <span className="text-emerald-900 font-bold text-lg">Continue Your Turn!</span>
+                <span className="text-2xl">🃏</span>
+                <span className="text-white font-bold text-base sm:text-lg">Lucky Start!</span>
               </div>
-              <p className="text-emerald-900 text-sm mb-3">
-                You played 4 of a kind! Select cards to play or end your turn.
+              <p className="text-purple-100 text-xs sm:text-sm mb-3">
+                You have all 4 nines! Play them now or save them for later.
               </p>
-              <div className="flex gap-3">
+              <div className="flex gap-2 sm:gap-3">
                 <Button
                   onClick={handlePlayClick}
                   disabled={selectedCards.length === 0}
-                  className="bg-emerald-800 hover:bg-emerald-700 text-white font-bold"
+                  className="bg-white hover:bg-gray-100 text-purple-700 font-bold text-xs sm:text-sm"
                 >
                   Play Selected ({selectedCards.length})
                 </Button>
                 <Button
                   onClick={handleEndTurnClick}
                   variant="outline"
-                  className="bg-emerald-800 border-emerald-600 text-white hover:bg-emerald-700"
+                  className="bg-purple-700 border-purple-500 text-white hover:bg-purple-600 text-xs sm:text-sm"
+                >
+                  Save for Later
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Continue turn banner - Regular 4 of a kind */}
+          {gameState.canContinueTurn && isHumanTurn && !isFourNinesStart && (
+            <div className="bg-gradient-to-r from-amber-600 to-amber-500 rounded-lg p-3 sm:p-4 border-2 border-amber-400 shadow-lg flex-shrink-0 w-full max-w-sm">
+              <div className="flex items-center gap-2 mb-2">
+                <Zap className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-900" />
+                <span className="text-emerald-900 font-bold text-base sm:text-lg">Combo!</span>
+              </div>
+              <p className="text-emerald-900 text-xs sm:text-sm mb-3">
+                You played 4 of a kind! Play another card or end your turn.
+              </p>
+              <div className="flex gap-2 sm:gap-3">
+                <Button
+                  onClick={handlePlayClick}
+                  disabled={selectedCards.length === 0}
+                  className="bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm"
+                >
+                  Play Selected ({selectedCards.length})
+                </Button>
+                <Button
+                  onClick={handleEndTurnClick}
+                  variant="outline"
+                  className="bg-emerald-800 border-emerald-600 text-white hover:bg-emerald-700 text-xs sm:text-sm"
                 >
                   End Turn
                 </Button>
@@ -619,18 +684,18 @@ export function GameBoard({
 
           {/* Take options popup */}
           {showTakeOptions && (
-            <div className="bg-emerald-700 rounded-lg p-4 border border-emerald-500 shadow-lg flex-shrink-0">
-              <p className="text-emerald-100 mb-3 text-center font-medium">How many cards to take?</p>
-              <div className="flex gap-3">
+            <div className="bg-emerald-700 rounded-lg p-3 sm:p-4 border border-emerald-500 shadow-lg flex-shrink-0">
+              <p className="text-emerald-100 mb-2 sm:mb-3 text-center font-medium text-sm sm:text-base">How many cards to take?</p>
+              <div className="flex flex-col sm:flex-row gap-2">
                 <Button
                   onClick={handleTake3}
-                  className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold"
+                  className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-sm"
                 >
                   Take 3 Cards
                 </Button>
                 <Button
                   onClick={handleTakeAll}
-                  className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold"
+                  className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-sm"
                 >
                   Take All ({takeOptions.takeAllCount})
                 </Button>
@@ -638,29 +703,29 @@ export function GameBoard({
               <Button
                 onClick={handleCancel}
                 variant="outline"
-                className="w-full mt-2 bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500"
+                className="w-full mt-2 bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 text-sm"
               >
                 Cancel
               </Button>
             </div>
           )}
 
-          {/* Action buttons */}
+          {/* Action buttons - Desktop only */}
           {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
-            <div className="flex flex-wrap gap-3 justify-center flex-shrink-0">
+            <div className="hidden lg:flex flex-wrap gap-2 sm:gap-3 justify-center flex-shrink-0">
               <Button
                 onClick={handlePlayClick}
                 disabled={selectedCards.length === 0}
-                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-6"
+                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-4 sm:px-6 text-sm"
               >
-                Play Selected ({selectedCards.length})
+                Play ({selectedCards.length})
               </Button>
               
               {canTakeCards && (
                 <Button
                   onClick={handleTakeClick}
                   variant="outline"
-                  className="bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500"
+                  className="bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500 text-sm"
                 >
                   Take Cards
                 </Button>
@@ -735,24 +800,24 @@ export function GameBoard({
       </div>
 
       {/* Mobile: Game Info & History */}
-      <div className="lg:hidden bg-emerald-800 border-t border-emerald-600 p-4 flex-shrink-0">
+      <div className="lg:hidden bg-emerald-800 border-t border-emerald-600 p-2 sm:p-4 flex-shrink-0">
         {/* Players List - Compact */}
-        <div className="mb-4">
-          <div className="text-emerald-300 text-xs font-medium uppercase tracking-wide mb-2">Players</div>
-          <div className="flex flex-wrap gap-2">
+        <div className="mb-3 sm:mb-4">
+          <div className="text-emerald-300 text-[10px] sm:text-xs font-medium uppercase tracking-wide mb-1 sm:mb-2">Players</div>
+          <div className="flex flex-wrap gap-1 sm:gap-2">
             {gameState.players.map((player: any) => {
               const isCurrent = player.id === currentPlayer?.id;
               return (
                 <div
                   key={player.id}
-                  className={`px-2 py-1 rounded text-xs border ${
+                  className={`px-2 py-1 rounded text-[10px] sm:text-xs border ${
                     isCurrent
                       ? 'border-amber-400 bg-amber-500/20 text-amber-300'
                       : 'border-emerald-600 bg-emerald-700/50 text-emerald-200'
                   } ${player.hasFinished ? 'opacity-60' : ''}`}
                 >
                   <span className="font-medium">{player.name}</span>
-                  {player.isAI && <span className="text-emerald-400 ml-1">AI</span>}
+                  {player.isAI && <span className="text-emerald-400 ml-0.5">AI</span>}
                   <span className="text-emerald-400 ml-1">
                     {player.hasFinished ? `#${player.finishPosition}` : `(${player.hand.length})`}
                   </span>
@@ -767,27 +832,27 @@ export function GameBoard({
           onClick={() => setShowHistory(!showHistory)}
           className="flex items-center justify-between w-full"
         >
-          <div className="flex items-center gap-2">
-            <History className="w-4 h-4 text-amber-400" />
-            <span className="text-white font-medium text-sm">Move History</span>
-            <span className="text-emerald-400 text-xs">({gameState.moveHistory.length})</span>
+          <div className="flex items-center gap-1 sm:gap-2">
+            <History className="w-3 h-3 sm:w-4 sm:h-4 text-amber-400" />
+            <span className="text-white font-medium text-xs sm:text-sm">Move History</span>
+            <span className="text-emerald-400 text-[10px] sm:text-xs">({gameState.moveHistory.length})</span>
           </div>
           {showHistory ? (
-            <ChevronUp className="w-4 h-4 text-emerald-400" />
+            <ChevronUp className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
           ) : (
-            <ChevronDown className="w-4 h-4 text-emerald-400" />
+            <ChevronDown className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
           )}
         </button>
         
         {showHistory && (
-          <div className="mt-3 space-y-1 max-h-32 overflow-y-auto">
+          <div className="mt-2 sm:mt-3 space-y-1 max-h-24 sm:max-h-32 overflow-y-auto">
             {gameState.moveHistory.length === 0 ? (
-              <p className="text-emerald-400 text-xs italic">No moves yet</p>
+              <p className="text-emerald-400 text-[10px] sm:text-xs italic">No moves yet</p>
             ) : (
               gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
                 <div 
                   key={move.id} 
-                  className={`text-xs p-2 rounded ${
+                  className={`text-[10px] sm:text-xs p-1.5 sm:p-2 rounded ${
                     move.type === 'play' 
                       ? 'bg-emerald-700/50' 
                       : 'bg-amber-900/30'
@@ -797,7 +862,7 @@ export function GameBoard({
                     <span className={`font-medium ${move.type === 'play' ? 'text-amber-300' : 'text-emerald-300'}`}>
                       {move.playerName}
                     </span>
-                    <span className="text-emerald-500 text-[10px]">T{move.turnNumber}</span>
+                    <span className="text-emerald-500 text-[8px] sm:text-[10px]">T{move.turnNumber}</span>
                   </div>
                   <div className="text-emerald-200 truncate">
                     {move.type === 'play' ? (
@@ -819,38 +884,6 @@ export function GameBoard({
           </div>
         )}
       </div>
-
-      {/* Mobile: Fixed Action Buttons at bottom */}
-      {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
-        <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-emerald-800 border-t border-emerald-600 p-4 flex gap-3 justify-center">
-          <Button
-            onClick={handlePlayClick}
-            disabled={selectedCards.length === 0}
-            className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-6"
-          >
-            Play ({selectedCards.length})
-          </Button>
-          
-          {canTakeCards && (
-            <Button
-              onClick={handleTakeClick}
-              variant="outline"
-              className="bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500"
-            >
-              Take Cards
-            </Button>
-          )}
-          
-          <Button
-            onClick={onPauseGame}
-            variant="outline"
-            size="sm"
-            className="bg-emerald-700 border-emerald-500 text-emerald-100 hover:bg-emerald-600"
-          >
-            <Pause className="w-4 h-4" />
-          </Button>
-        </div>
-      )}
 
       {/* Desktop: Player Hand at bottom */}
       {shouldShowHand && (
