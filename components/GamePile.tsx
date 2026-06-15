@@ -37,9 +37,7 @@ export function GamePile({ pile }: GamePileProps) {
         {pile.length} card{pile.length !== 1 ? 's' : ''}
       </div>
       
-      <div className="relative h-40 flex items-center justify-center" style="
-    left: -2em;
-    top: 1em;>
+      <div className="relative h-40 flex items-center justify-center">
         {visibleCards.map((card, index) => {
           const totalWidth = (visibleCount - 1) * 16;
           const offsetX = index * 16 - totalWidth / 2;
