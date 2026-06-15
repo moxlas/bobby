@@ -141,6 +141,16 @@ export function validatePlay(cards: Card[], pile: Card[], isFirstMove: boolean, 
   return { valid: true, continueTurn: false };
 }
 
+export function canContinueAfterPlay(hand: Card[], pile: Card[]): boolean {
+  if (hand.length === 0) return false;
+  
+  const topCard = pile[pile.length - 1];
+  const hasValidCard = hand.some(c => c.value >= topCard.value);
+  const fourOfKindValue = hasFourOfSameValue(hand);
+  
+  return hasValidCard || fourOfKindValue !== null;
+}
+
 export function playCards(state: GameState, playerId: number, cards: Card[], continueTurn: boolean = false): GameState {
   const newPlayers = [...state.players];
   const player = newPlayers[playerId];
