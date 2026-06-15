@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Button } from './ui/button';
-import { GameOptions, DEFAULT_OPTIONS } from '../types/game';
-import { Users, Play, BookOpen, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
+import { GameOptions, DEFAULT_OPTIONS, AIDifficulty } from '../types/game';
+import { Users, Play, BookOpen, ChevronDown, ChevronUp, AlertCircle, Settings, Zap, ToggleLeft, ToggleRight } from 'lucide-react';
 
 interface PlayerSetup {
   name: string;
@@ -13,193 +13,323 @@ interface SetupScreenProps {
 }
 
 const GAME_RULES = [
-  { title: "Overview", content: "The Bobby is a multiplayer card game for 1-8 players. The goal is to be the first to get rid of all your cards!" },
-  { title: "Deck & Dealing", content: "The game uses a partial deck with cards from 9 to Ace (24 cards total). Cards are shuffled, cut, and dealt face down to all players one at a time." },
-  { title: "Starting the Game", content: "The player with the 9 of diamonds starts the game by throwing it face up on the table. Play continues clockwise." },
-  { title: "Playing Cards", content: "Cards are placed on top of the pile in a single stack. You can only play a card of equal or higher value than the top card. The 9 of diamonds always stays at the bottom of the pile." },
-  { title: "Taking Cards", content: "If you cannot play a valid card, you must take cards from the pile. You can take 3 cards or all available cards (except the 9 of diamonds)." },
-  { title: "Four of a Kind", content: "If you have 4 cards of the same value, you can play them as a single card! After playing 4 of a kind, you can immediately play another card or set of 4 on top." },
-  { title: "The 9's Special Rule", content: "If the 9 of diamonds is the only card on the table and you have the other three 9's, you can throw all three 9's on top at once, then continue with another card." },
-  { title: "Winning", content: "The first player to get rid of all their cards wins! The last player with cards is the loser!" }
+  { title: "Overview", text: "Get rid of all your cards to win. The last player with cards loses!" },
+  { title: "Starting", text: "9 of diamonds starts the game. The player with it plays first." },
+  { title: "Playing Cards", text: "Cards must be equal or higher value than the top card of the pile." },
+  { title: "Taking Cards", text: "If you can't play, take 3 cards (or all available) from the pile." },
+  { title: "Four of a Kind", text: "Play 4 cards of the same value as a single move, then play another card!" },
+  { title: "Special 9's", text: "When only 9♦ is on the table, you can play 3 other 9's together." },
+];
+
+const AI_DIFFICULTY_OPTIONS: { value: AIDifficulty; label: string; description: string }[] = [
+  { value: 'easy', label: 'Easy', description: 'AI plays simple moves, always ends turn after playing' },
+  { value: 'medium', label: 'Medium', description: 'AI uses 4-of-a-kind and multi-9 moves strategically' },
 ];
 
 export function SetupScreen({ onStartGame }: SetupScreenProps) {
   const [playerCount, setPlayerCount] = useState(2);
   const [players, setPlayers] = useState<PlayerSetup[]>([
     { name: 'Player 1', isAI: false },
-    { name: 'Player 2', isAI: true }
+    { name: 'Player 2', isAI: true },
   ]);
-  const [options, setOptions] = useState<GameOptions>(DEFAULT_OPTIONS);
   const [showRules, setShowRules] = useState(false);
-  const [expandedRule, setExpandedRule] = useState<number | null>(null);
+  const [showOptions, setShowOptions] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  // Game options - all enabled by default
+  const [allowFourNinesStart, setAllowFourNinesStart] = useState(true);
+  const [allowTakeAllCards, setAllowTakeAllCards] = useState(true);
+  const [specialNineRule, setSpecialNineRule] = useState(true);
+  const [aiDifficulty, setAiDifficulty] = useState<AIDifficulty>('easy');
 
   const handlePlayerCountChange = (count: number) => {
-    const newCount = Math.max(1, Math.min(8, count));
-    setPlayerCount(newCount);
-    
+    setPlayerCount(count);
     const newPlayers: PlayerSetup[] = [];
-    for (let i = 0; i < newCount; i++) {
-      if (i < players.length) {
-        newPlayers.push(players[i]);
-      } else {
-        newPlayers.push({ name: `Player ${i + 1}`, isAI: true });
-      }
+    for (let i = 0; i < count; i++) {
+      newPlayers.push({
+        name: players[i]?.name || `Player ${i + 1}`,
+        isAI: players[i]?.isAI ?? (i > 0),
+      });
     }
     setPlayers(newPlayers);
+    setError(null);
   };
 
   const handlePlayerNameChange = (index: number, name: string) => {
     const newPlayers = [...players];
     newPlayers[index] = { ...newPlayers[index], name };
     setPlayers(newPlayers);
+    setError(null);
   };
 
   const handlePlayerTypeChange = (index: number, isAI: boolean) => {
     const newPlayers = [...players];
     newPlayers[index] = { ...newPlayers[index], isAI };
     setPlayers(newPlayers);
+    setError(null);
   };
 
-  const canStart = players.length >= 1 && players.length <= 8 && players.every(p => p.name.trim());
+  const handleStartGame = () => {
+    // Validate at least one human player
+    const humanPlayers = players.filter(p => !p.isAI);
+    if (humanPlayers.length === 0) {
+      setError('At least one human player is required!');
+      return;
+    }
+
+    // Validate names
+    const emptyNames = players.filter(p => p.name.trim() === '');
+    if (emptyNames.length > 0) {
+      setError('All players must have a name!');
+      return;
+    }
+
+    const options: GameOptions = {
+      allowFourNinesStart,
+      allowTakeAllCards,
+      specialNineRule,
+      aiDifficulty,
+    };
+
+    onStartGame(players, options);
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-emerald-900 to-emerald-950 flex items-center justify-center p-4">
-      <div className="w-full max-w-4xl">
-        <div className="text-center mb-8">
-          <h1 className="text-5xl font-bold text-amber-300 mb-2">🃏 The Bobby</h1>
-          <p className="text-emerald-300 text-lg">A multiplayer card game</p>
+    <div className="min-h-screen bg-emerald-900 flex items-center justify-center p-4">
+      <div className="w-full max-w-2xl bg-emerald-800 rounded-xl shadow-2xl overflow-hidden border border-emerald-600">
+        {/* Header */}
+        <div className="bg-amber-500 p-6 text-center">
+          <h1 className="text-3xl font-bold text-emerald-900 mb-2">🃏 The Bobby</h1>
+          <p className="text-amber-700">A multiplayer card game</p>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-6">
-          <div className="bg-emerald-800 rounded-2xl p-6 shadow-2xl border border-emerald-600">
-            <h2 className="text-xl font-bold text-amber-300 mb-4 flex items-center gap-2">
-              <Users className="w-5 h-5" />
-              Players
-            </h2>
-
-            <div className="mb-6">
-              <label className="text-emerald-200 text-sm mb-2 block">Number of Players</label>
-              <div className="flex items-center gap-4">
-                <input
-                  type="range"
-                  min="1"
-                  max="8"
-                  value={playerCount}
-                  onChange={(e) => handlePlayerCountChange(parseInt(e.target.value))}
-                  className="flex-1 h-2 bg-emerald-600 rounded-lg appearance-none cursor-pointer accent-amber-400"
-                />
-                <span className="text-amber-300 font-bold text-xl w-8 text-center">{playerCount}</span>
-              </div>
+        {/* Content */}
+        <div className="p-6 space-y-6">
+          {/* Error Message */}
+          {error && (
+            <div className="bg-red-500/20 border border-red-500 rounded-lg p-3 flex items-center gap-2 text-red-200">
+              <AlertCircle className="w-5 h-5 flex-shrink-0" />
+              <span>{error}</span>
             </div>
+          )}
 
-            <div className="space-y-3 max-h-80 overflow-y-auto pr-2">
-              {players.map((player, index) => (
-                <div key={index} className="flex gap-2">
+          {/* Player Count */}
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-emerald-300">Number of Players</label>
+            <div className="flex gap-2">
+              {[2, 3, 4, 5, 6, 7, 8].map((count) => (
+                <button
+                  key={count}
+                  onClick={() => handlePlayerCountChange(count)}
+                  className={`w-10 h-10 rounded-lg font-medium transition-all ${
+                    playerCount === count
+                      ? 'bg-amber-500 text-emerald-900'
+                      : 'bg-emerald-600 text-emerald-300 hover:bg-emerald-500'
+                  }`}
+                >
+                  {count}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Player Setup */}
+          <div className="space-y-3">
+            <label className="text-sm font-medium text-emerald-300">Players</label>
+            {players.map((player, index) => (
+              <div key={index} className="flex gap-3 items-center">
+                <div className="flex-1">
                   <input
                     type="text"
                     value={player.name}
                     onChange={(e) => handlePlayerNameChange(index, e.target.value)}
                     placeholder={`Player ${index + 1}`}
-                    className="flex-1 bg-emerald-700 border border-emerald-500 rounded-lg px-3 py-2 text-white placeholder-emerald-400 focus:outline-none focus:border-amber-400"
+                    className="w-full px-4 py-2 rounded-lg bg-emerald-700 border border-emerald-500 text-white placeholder-emerald-400 focus:outline-none focus:ring-2 focus:ring-amber-500"
                   />
+                </div>
+                <div className="flex gap-1">
                   <button
-                    onClick={() => handlePlayerTypeChange(index, !player.isAI)}
-                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                      player.isAI ? 'bg-emerald-600 text-emerald-200 hover:bg-emerald-500' : 'bg-amber-500 text-emerald-900 hover:bg-amber-400'
+                    onClick={() => handlePlayerTypeChange(index, false)}
+                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                      !player.isAI
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-emerald-600 text-emerald-400 hover:bg-emerald-500'
                     }`}
                   >
-                    {player.isAI ? 'AI' : 'Human'}
+                    Human
                   </button>
+                  <button
+                    onClick={() => handlePlayerTypeChange(index, true)}
+                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                      player.isAI
+                        ? 'bg-amber-500 text-emerald-900'
+                        : 'bg-emerald-600 text-emerald-400 hover:bg-emerald-500'
+                    }`}
+                  >
+                    AI
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Options Toggle */}
+          <button
+            onClick={() => setShowOptions(!showOptions)}
+            className="w-full flex items-center justify-between p-4 rounded-lg bg-emerald-700 hover:bg-emerald-600 transition-colors border border-emerald-500"
+          >
+            <div className="flex items-center gap-2">
+              <Settings className="w-5 h-5 text-amber-400" />
+              <span className="text-white font-medium">Game Options</span>
+            </div>
+            {showOptions ? (
+              <ChevronUp className="w-5 h-5 text-emerald-400" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-emerald-400" />
+            )}
+          </button>
+
+          {/* Options Content */}
+          {showOptions && (
+            <div className="bg-emerald-700/50 rounded-lg p-4 space-y-4 border border-emerald-500">
+              {/* 4 of a Kind Rule */}
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    <span className="text-white font-medium">4 of a Kind Rule</span>
+                  </div>
+                  <p className="text-emerald-400 text-xs mt-1">
+                    Play 4 cards of the same value as a single move, then continue your turn
+                  </p>
+                </div>
+                <button
+                  onClick={() => setAllowFourNinesStart(!allowFourNinesStart)}
+                  className={`p-2 rounded-lg transition-all ${
+                    allowFourNinesStart
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-emerald-600 text-emerald-400'
+                  }`}
+                >
+                  {allowFourNinesStart ? (
+                    <ToggleRight className="w-6 h-6" />
+                  ) : (
+                    <ToggleLeft className="w-6 h-6" />
+                  )}
+                </button>
+              </div>
+
+              {/* Continue Turn */}
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    <span className="text-white font-medium">Continue Turn</span>
+                  </div>
+                  <p className="text-emerald-400 text-xs mt-1">
+                    After playing 4 of a kind, you may play another card
+                  </p>
+                </div>
+                <button
+                  onClick={() => setAllowTakeAllCards(!allowTakeAllCards)}
+                  className={`p-2 rounded-lg transition-all ${
+                    allowTakeAllCards
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-emerald-600 text-emerald-400'
+                  }`}
+                >
+                  {allowTakeAllCards ? (
+                    <ToggleRight className="w-6 h-6" />
+                  ) : (
+                    <ToggleLeft className="w-6 h-6" />
+                  )}
+                </button>
+              </div>
+
+              {/* Special 9's Rule */}
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-400" />
+                    <span className="text-white font-medium">Special 9's Rule</span>
+                  </div>
+                  <p className="text-emerald-400 text-xs mt-1">
+                    When only 9♦ is on the table, you can play 3 other 9's together
+                  </p>
+                </div>
+                <button
+                  onClick={() => setSpecialNineRule(!specialNineRule)}
+                  className={`p-2 rounded-lg transition-all ${
+                    specialNineRule
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-emerald-600 text-emerald-400'
+                  }`}
+                >
+                  {specialNineRule ? (
+                    <ToggleRight className="w-6 h-6" />
+                  ) : (
+                    <ToggleLeft className="w-6 h-6" />
+                  )}
+                </button>
+              </div>
+
+              {/* AI Difficulty */}
+              <div className="pt-2 border-t border-emerald-500">
+                <label className="text-sm font-medium text-emerald-300 mb-2 block">AI Difficulty</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {AI_DIFFICULTY_OPTIONS.map((option) => (
+                    <button
+                      key={option.value}
+                      onClick={() => setAiDifficulty(option.value)}
+                      className={`p-3 rounded-lg text-left transition-all border ${
+                        aiDifficulty === option.value
+                          ? 'bg-amber-500 border-amber-400 text-emerald-900'
+                          : 'bg-emerald-600 border-emerald-500 text-emerald-300 hover:bg-emerald-500'
+                      }`}
+                    >
+                      <div className="font-medium">{option.label}</div>
+                      <div className={`text-xs mt-1 ${aiDifficulty === option.value ? 'text-amber-700' : 'text-emerald-400'}`}>
+                        {option.description}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Rules Toggle */}
+          <button
+            onClick={() => setShowRules(!showRules)}
+            className="w-full flex items-center justify-between p-4 rounded-lg bg-emerald-700 hover:bg-emerald-600 transition-colors border border-emerald-500"
+          >
+            <div className="flex items-center gap-2">
+              <BookOpen className="w-5 h-5 text-amber-400" />
+              <span className="text-white font-medium">Game Rules</span>
+            </div>
+            {showRules ? (
+              <ChevronUp className="w-5 h-5 text-emerald-400" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-emerald-400" />
+            )}
+          </button>
+
+          {/* Rules Content */}
+          {showRules && (
+            <div className="bg-emerald-700/50 rounded-lg p-4 space-y-3 border border-emerald-500">
+              {GAME_RULES.map((rule, index) => (
+                <div key={index} className="text-sm">
+                  <span className="text-amber-400 font-medium">{rule.title}: </span>
+                  <span className="text-emerald-200">{rule.text}</span>
                 </div>
               ))}
             </div>
-
-            <div className="mt-6 pt-4 border-t border-emerald-600">
-              <h3 className="text-lg font-bold text-amber-300 mb-3">Game Options</h3>
-              <div className="space-y-3">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={options.allowFourNinesStart}
-                    onChange={(e) => setOptions({ ...options, allowFourNinesStart: e.target.checked })}
-                    className="w-5 h-5 rounded border-emerald-500 bg-emerald-700 text-amber-400 focus:ring-amber-400"
-                  />
-                  <span className="text-emerald-200 text-sm">Allow 4 Nines at Start</span>
-                </label>
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={options.allowTakeAllCards}
-                    onChange={(e) => setOptions({ ...options, allowTakeAllCards: e.target.checked })}
-                    className="w-5 h-5 rounded border-emerald-500 bg-emerald-700 text-amber-400 focus:ring-amber-400"
-                  />
-                  <span className="text-emerald-200 text-sm">Allow Take All Cards</span>
-                </label>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-emerald-800 rounded-2xl p-6 shadow-2xl border border-emerald-600">
-            <button
-              onClick={() => setShowRules(!showRules)}
-              className="w-full flex items-center justify-between text-xl font-bold text-amber-300 mb-4"
-            >
-              <div className="flex items-center gap-2">
-                <BookOpen className="w-5 h-5" />
-                Game Rules
-              </div>
-              {showRules ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-            </button>
-
-            {showRules ? (
-              <div className="space-y-2 max-h-96 overflow-y-auto pr-2">
-                {GAME_RULES.map((rule, index) => (
-                  <div key={index} className="bg-emerald-700 rounded-lg overflow-hidden">
-                    <button
-                      onClick={() => setExpandedRule(expandedRule === index ? null : index)}
-                      className="w-full flex items-center justify-between p-3 text-left hover:bg-emerald-600 transition-colors"
-                    >
-                      <span className="text-amber-200 font-medium text-sm">{rule.title}</span>
-                      {expandedRule === index ? <ChevronUp className="w-4 h-4 text-emerald-400" /> : <ChevronDown className="w-4 h-4 text-emerald-400" />}
-                    </button>
-                    {expandedRule === index && (
-                      <div className="px-3 pb-3">
-                        <p className="text-emerald-100 text-sm leading-relaxed">{rule.content}</p>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-8">
-                <BookOpen className="w-12 h-12 text-emerald-600 mx-auto mb-3" />
-                <p className="text-emerald-400">Click to read the game rules</p>
-              </div>
-            )}
-
-            <div className="mt-6 pt-4 border-t border-emerald-600">
-              <h3 className="text-amber-300 font-bold mb-2 text-sm">Quick Start</h3>
-              <ul className="text-emerald-300 text-xs space-y-1">
-                <li>• 9 of diamonds starts the game</li>
-                <li>• Play equal or higher cards</li>
-                <li>• Can't play? Take 3 cards!</li>
-                <li>• 4 of a kind = bonus turn</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-8 text-center">
-          {!canStart && (
-            <div className="flex items-center justify-center gap-2 text-red-400 mb-3">
-              <AlertCircle className="w-4 h-4" />
-              <span className="text-sm">All players need a name</span>
-            </div>
           )}
+
+          {/* Start Button */}
           <Button
-            onClick={() => onStartGame(players, options)}
-            disabled={!canStart}
-            className="bg-amber-500 hover:bg-amber-400 text-emerald-900 font-bold text-lg px-12 py-6 rounded-xl shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={handleStartGame}
+            className="w-full py-4 text-lg font-bold bg-amber-500 hover:bg-amber-600 text-emerald-900"
           >
             <Play className="w-5 h-5 mr-2" />
             Start Game
