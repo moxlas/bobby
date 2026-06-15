@@ -1,4 +1,3 @@
-import React from 'react';
 import { Card as CardType } from '../types/game';
 import { Card } from './Card';
 
@@ -10,7 +9,7 @@ export function GamePile({ pile }: GamePileProps) {
   const visibleCount = Math.min(3, pile.length);
   const visibleCards = pile.slice(-visibleCount);
   const topCard = pile[pile.length - 1];
-  
+
   const getValueDisplay = (value: number): string => {
     switch (value) {
       case 11: return 'J';
@@ -36,15 +35,15 @@ export function GamePile({ pile }: GamePileProps) {
       <div className="my-4 bg-emerald-700 px-3 py-1.5 rounded-full text-emerald-200 text-base whitespace-nowrap">
         {pile.length} card{pile.length !== 1 ? 's' : ''}
       </div>
-      
+
       <div className="relative h-40 flex items-center justify-center">
         {visibleCards.map((card, index) => {
           const totalWidth = (visibleCount - 1) * 16;
           const offsetX = index * 16 - totalWidth / 2;
           const offsetY = index * -3;
-          
+
           return (
-            <div 
+            <div
               key={card.id}
               className="absolute transition-all duration-200"
               style={{ left: `${offsetX}px`, top: `${offsetY}px`, zIndex: index + 1 }}
@@ -54,7 +53,7 @@ export function GamePile({ pile }: GamePileProps) {
           );
         })}
       </div>
-      
+
       <div className="my-4 text-center">
         <span className="text-emerald-300 text-xs">Top: </span>
         <span className="text-amber-300 font-bold text-sm">

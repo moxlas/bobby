@@ -1,6 +1,5 @@
 import { Card, Suit, Value } from '../types/game';
 
-// Suit order for sorting: clubs < diamonds < hearts < spades
 const SUIT_ORDER: Record<Suit, number> = {
   clubs: 0,
   diamonds: 1,
@@ -11,7 +10,7 @@ const SUIT_ORDER: Record<Suit, number> = {
 export function createDeck(): Card[] {
   const suits: Suit[] = ['hearts', 'diamonds', 'clubs', 'spades'];
   const cards: Card[] = [];
-  
+
   for (const suit of suits) {
     for (let value = 9; value <= 14; value++) {
       cards.push({
@@ -22,18 +21,18 @@ export function createDeck(): Card[] {
       });
     }
   }
-  
+
   return cards;
 }
 
 export function shuffleDeck(deck: Card[]): Card[] {
   const shuffled = [...deck];
-  
+
   for (let i = shuffled.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
-  
+
   return shuffled;
 }
 
@@ -44,24 +43,21 @@ export function cutDeck(deck: Card[]): Card[] {
 
 export function sortHand(hand: Card[]): Card[] {
   return [...hand].sort((a, b) => {
-    // First sort by value (ascending)
     if (a.value !== b.value) {
       return a.value - b.value;
     }
-    // Then by suit order
     return SUIT_ORDER[a.suit] - SUIT_ORDER[b.suit];
   });
 }
 
 export function dealCards(deck: Card[], playerCount: number): Card[][] {
   const hands: Card[][] = Array.from({ length: playerCount }, () => []);
-  
+
   deck.forEach((card, index) => {
     const playerIndex = index % playerCount;
     hands[playerIndex].push(card);
   });
-  
-  // Sort all hands after dealing
+
   return hands.map(hand => sortHand(hand));
 }
 
@@ -71,15 +67,15 @@ export function findNineOfDiamonds(hand: Card[]): Card | undefined {
 
 export function hasFourOfSameValue(hand: Card[]): number | null {
   const valueCounts = new Map<number, number>();
-  
+
   for (const card of hand) {
     valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
   }
-  
+
   for (const [value, count] of valueCounts) {
     if (count === 4) return value;
   }
-  
+
   return null;
 }
 

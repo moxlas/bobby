@@ -1,6 +1,3 @@
-import React from 'react';
-import { Button } from './ui/button';
-
 interface ConfirmPopupProps {
   message: string;
   onConfirm: () => void;
@@ -14,12 +11,18 @@ export function ConfirmPopup({ message, onConfirm, onCancel }: ConfirmPopupProps
         <h3 className="text-lg font-bold text-amber-300 mb-4">Confirm Move</h3>
         <p className="text-emerald-100 mb-6">{message}</p>
         <div className="flex gap-3">
-          <Button onClick={onConfirm} className="flex-1 bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold">
+          <button
+            onClick={onConfirm}
+            className="flex-1 bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold py-2 px-4 rounded-lg transition-colors"
+          >
             Confirm
-          </Button>
-          <Button onClick={onCancel} variant="outline" className="flex-1 bg-emerald-600 border-emerald-400 text-white hover:bg-emerald-500">
+          </button>
+          <button
+            onClick={onCancel}
+            className="flex-1 bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 py-2 px-4 rounded-lg transition-colors"
+          >
             Cancel
-          </Button>
+          </button>
         </div>
       </div>
     </div>
