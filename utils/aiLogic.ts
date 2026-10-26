@@ -1,596 +1,852 @@
 import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
 import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
-import { getValidMoves, getTakeOptions, validatePlay } from './gameLogic';
+import { getNextPlayerIndex, getTakeOptions, validatePlay } from './gameLogic';
+
+export type AIMove = { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' };
 
 // ============================================================
-// HARD AI STRATEGY:
-// 
-// 1. AVOID taking cards unless highly beneficial
-// 2. Take ONLY when:
-//    - Would complete a 4-of-a-kind (combo play)
-//    - Would get high cards to preserve them
-//    - Opponent is about to win and we need to block
-// 3. Play HIGH cards strategically to:
-//    - Force opponents to take cards
-//    - Uncover lower cards in pile for later
-// 4. Evaluate pile composition before deciding
-// 
-// CARD ORDERING RULES:
-//    - 9 can ONLY be placed on 9
-//    - 10 can be placed on 9 or 10
-//    - J can be placed on 9, 10, J
-//    - etc. (card must be >= top card value)
-//    - 4-of-a-kind MUST ALSO follow this rule!
-//      (4 tens on 9, 4 queens on 9/J/Q, etc.)
-//    - EXCEPTION: 4 nines can be played on 9 of diamonds
-//      at game start (special rule)
+// AI logic — updated to guarantee AI never skips a turn.
+// - AI must either PLAY or TAKE when an action is available.
+// - If pile contains only 9♦ (no take possible), AI is forced to play.
+// - Taking ends the turn immediately; once AI plays, taking is illegal.
+// - Continuation phase only returns PLAY or END TURN when truly no options.
 // ============================================================
 
+// -----------------------------
+// Score weights (tunable)
+// -----------------------------
 const SCORE_WEIGHTS = {
-  // Hand composition
   THREE_OF_A_KIND_PENALTY: -30,
   TWO_OF_A_KIND_BONUS: 5,
   FOUR_OF_A_KIND_BONUS: 80,
   NINE_TRIPLE_BONUS: 40,
   NINE_QUAD_BONUS: 90,
-  
-  // Taking cards - HEAVY penalties
+
+  HIGH_CARD_PENALTY: -29,
+  ACE_PENALTY: -36,
+  FOUR_ACES_PENALTY: -500,
+  PRESERVE_HIGH_CARDS_BONUS: 15,
+
   TAKING_CARDS_BASE_PENALTY: -50,
   TAKING_COMPLETES_QUAD_BONUS: 120,
   TAKING_HIGH_CARDS_BONUS: 15,
   TAKING_USEFUL_CARDS_BONUS: 25,
   TAKING_WHEN_LEADING_PENALTY: -40,
-  
-  // Playing cards
+
   WINNING_MOVE_BONUS: 2000,
   CARDS_REMAINING_PENALTY: -15,
   CAN_FINISH_SOON_BONUS: 200,
-  
-  // Strategic play
+
   FORCE_OPPONENT_TAKE_BONUS: 45,
   PLAYING_HIGH_TO_BLOCK: 35,
-  PRESERVE_HIGH_CARDS: 8,
   PLAY_LOW_CARDS_BONUS: 5,
-  
-  // Opponent awareness
+
   OPPONENT_CLOSE_TO_WIN_PENALTY: -100,
-  BLOCKING_OPPONENT_BONUS: 30,
-  LEADING_POSITION_BONUS: 20,
-  
-  // Pile awareness
-  UNCOVER_LOW_CARDS_BONUS: 20,
+  BLOCKING_OPPONENT_BONUS: 50,
+  LEADING_POSITION_BONUS: 30,
+
+  UNCOVER_LOW_CARDS_BONUS: 30,
   OPPONENT_TAKES_BAD_PENALTY: -25,
+
+  NINE_PLUS_ACE_TRAP_BONUS: 150,
+  FOUR_OF_KIND_TRAP_BONUS: 100,
 };
 
-// Analyze pile composition
-function analyzePile(pile: Card[]): {
-  topValue: number;
-  hasLowCards: boolean;
-  lowestCard: number;
-  averageValue: number;
-  cardValues: number[];
-} {
+// -----------------------------
+// Utilities & Analysis
+// -----------------------------
+function analyzePile(pile: Card[]) {
   if (pile.length <= 1) {
     return {
       topValue: pile[0]?.value || 0,
       hasLowCards: false,
       lowestCard: 14,
       averageValue: 0,
-      cardValues: []
+      cardValues: [] as number[],
     };
   }
-  
   const values = pile.slice(1).map(c => c.value);
   const avg = values.reduce((a, b) => a + b, 0) / values.length;
-  
   return {
     topValue: pile[pile.length - 1].value,
     hasLowCards: values.some(v => v <= 10),
     lowestCard: Math.min(...values),
     averageValue: avg,
-    cardValues: values
+    cardValues: values,
   };
 }
 
-// Check if taking cards would complete a 4-of-a-kind
-function wouldCompleteQuad(hand: Card[], cardsToTake: Card[]): { wouldComplete: boolean; value: number | null } {
+function wouldCompleteQuad(hand: Card[], cardsToTake: Card[]) {
   const combined = [...hand, ...cardsToTake];
   const valueCounts = new Map<number, number>();
-  
   for (const card of combined) {
     valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
   }
-  
   for (const [value, count] of valueCounts) {
     if (count === 4) {
-      // Check if we already had 3 before taking
       const hadThreeBefore = hand.filter(c => c.value === value).length === 3;
       if (hadThreeBefore) {
         return { wouldComplete: true, value };
       }
     }
   }
-  
   return { wouldComplete: false, value: null };
 }
 
-// Check if taking cards would give us high cards we can use
-function wouldGetHighCards(cardsToTake: Card[]): boolean {
-  return cardsToTake.some(c => c.value >= 13); // K or A
+function wouldGetHighCards(cardsToTake: Card[]) {
+  return cardsToTake.some(c => c.value >= 13);
 }
 
-// Check if taking cards would fix a bad 3-of-a-kind situation
-function wouldFixTriple(hand: Card[], cardsToTake: Card[]): boolean {
+function wouldFixTriple(hand: Card[], cardsToTake: Card[]) {
   const valueCounts = new Map<number, number>();
-  
-  // Count current triples (bad)
   for (const card of hand) {
     valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
   }
-  
-  // Check if any current triple would become a quad
   for (const [value, count] of valueCounts) {
     if (count === 3) {
       const takingThisValue = cardsToTake.filter(c => c.value === value).length;
-      if (takingThisValue === 1) {
-        return true; // Would fix the triple by making it a quad
-      }
+      if (takingThisValue === 1) return true;
     }
   }
-  
   return false;
 }
 
-// Evaluate hand composition
-function evaluateHandComposition(hand: Card[]): number {
-  let score = 0;
-  const valueCounts = new Map<number, number>();
-  
+function countHighCards(hand: Card[]) {
+  let jacks = 0, queens = 0, kings = 0, aces = 0;
   for (const card of hand) {
-    valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
+    if (card.value === 11) jacks++;
+    else if (card.value === 12) queens++;
+    else if (card.value === 13) kings++;
+    else if (card.value === 14) aces++;
   }
-  
-  for (const [value, count] of valueCounts) {
-    if (count === 4) {
-      score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
-      if (value === 9) {
-        score += SCORE_WEIGHTS.NINE_QUAD_BONUS;
-      }
-    } else if (count === 3) {
-      if (value === 9) {
-        score += SCORE_WEIGHTS.NINE_TRIPLE_BONUS;
-      } else {
-        score += SCORE_WEIGHTS.THREE_OF_A_KIND_PENALTY;
-      }
-    } else if (count === 2) {
-      score += SCORE_WEIGHTS.TWO_OF_A_KIND_BONUS;
-    }
-  }
-  
-  score += hand.length * SCORE_WEIGHTS.CARDS_REMAINING_PENALTY;
-  
-  return score;
+  return { jacks, queens, kings, aces, total: jacks + queens + kings + aces };
 }
 
-// Estimate opponent hand strength
-function estimateOpponentStrength(state: GameState, playerId: number): {
-  strongestOpponent: Player | null;
-  weakestOpponent: Player | null;
-  avgOpponentCards: number;
-  opponentCloseToWin: boolean;
-} {
+function estimateOpponentStrength(state: GameState, playerId: number) {
   const opponents = state.players.filter(p => p.id !== playerId && !p.hasFinished);
-  
   if (opponents.length === 0) {
     return {
       strongestOpponent: null,
       weakestOpponent: null,
       avgOpponentCards: 0,
-      opponentCloseToWin: false
+      opponentCloseToWin: false,
+      isOneVOne: false,
+      humanOpponent: null,
     };
   }
-  
   const sorted = [...opponents].sort((a, b) => a.hand.length - b.hand.length);
-  
+  const humanOpponent = opponents.find(p => !p.isAI) || null;
   return {
     strongestOpponent: sorted[0],
     weakestOpponent: sorted[sorted.length - 1],
     avgOpponentCards: opponents.reduce((sum, p) => sum + p.hand.length, 0) / opponents.length,
-    opponentCloseToWin: opponents.some(p => p.hand.length <= 2)
+    opponentCloseToWin: opponents.some(p => p.hand.length <= 2),
+    isOneVOne: opponents.length === 1,
+    humanOpponent,
   };
 }
 
-// Evaluate playing a high card to force opponent to take
-function evaluateForceOpponentTake(
-  cardToPlay: Card,
-  hand: Card[],
-  pile: Card[],
-  state: GameState,
-  playerId: number
-): number {
-  let bonus = 0;
-  
-  const pileAnalysis = analyzePile(pile);
-  const opponentInfo = estimateOpponentStrength(state, playerId);
-  
-  // If we play a high card (K or A), opponent might need to take
-  if (cardToPlay.value >= 13) {
-    // Check if opponent has low cards
-    if (opponentInfo.strongestOpponent && opponentInfo.strongestOpponent.hand.length <= 4) {
-      // Opponent with few cards likely has high cards or will struggle
-      bonus += SCORE_WEIGHTS.FORCE_OPPONENT_TAKE_BONUS;
-    }
-    
-    // If pile has low cards buried, opponent taking would be good for us
-    if (pileAnalysis.hasLowCards) {
-      bonus += SCORE_WEIGHTS.UNCOVER_LOW_CARDS_BONUS;
-    }
-  }
-  
-  // If we play a medium card (J or Q), still can force takes
-  if (cardToPlay.value >= 11 && cardToPlay.value <= 12) {
-    if (opponentInfo.opponentCloseToWin) {
-      // Block opponent by playing medium-high
-      bonus += SCORE_WEIGHTS.PLAYING_HIGH_TO_BLOCK;
-    }
-  }
-  
-  return bonus;
+interface OpponentCardTracker {
+  knownHands: Map<number, Card[]>;
+  unknownCounts: Map<number, number>;
+  unknownValueCeilings: Map<number, number>;
 }
 
-// Evaluate a play move
-function evaluatePlayMove(
-  cardsToPlay: Card[],
-  hand: Card[],
+function buildOpponentCardTracker(state: GameState, playerId: number): OpponentCardTracker {
+  const counts = new Map<number, number>();
+  for (let v = 9; v <= 14; v++) counts.set(v, 4);
+  for (const card of state.pile) counts.set(card.value, (counts.get(card.value) || 0) - 1);
+  const ownHand = state.players.find(p => p.id === playerId)?.hand ?? [];
+  for (const card of ownHand) counts.set(card.value, (counts.get(card.value) || 0) - 1);
+
+  // Reconstruct cards that opponents picked up from the public pile and have
+  // not played again. Those cards are known to be in that player's hand.
+  const knownByPlayer = new Map<number, Map<string, Card>>();
+  const unknownValueCeilings = new Map<number, number>();
+  const historicalPile: Card[] = [];
+  for (const player of state.players) knownByPlayer.set(player.id, new Map());
+  for (const move of state.moveHistory) {
+    const knownHand = knownByPlayer.get(move.playerId);
+    if (!knownHand) continue;
+    if (move.type === 'take') {
+      const previousTopValue = historicalPile[historicalPile.length - 1]?.value;
+      if (move.playerId !== playerId && previousTopValue !== undefined) {
+        const oldCeiling = unknownValueCeilings.get(move.playerId);
+        unknownValueCeilings.set(move.playerId, oldCeiling === undefined ? previousTopValue : Math.min(oldCeiling, previousTopValue));
+      }
+      for (const card of move.cards) knownHand.set(card.id, card);
+      historicalPile.splice(Math.max(0, historicalPile.length - move.cards.length), move.cards.length);
+    } else {
+      for (const card of move.cards) {
+        const wasKnownFromPickup = knownHand.has(card.id);
+        const ceiling = unknownValueCeilings.get(move.playerId);
+        if (!wasKnownFromPickup && ceiling !== undefined && card.value >= ceiling) {
+          // The observed play contradicts the old failed-response deduction;
+          // the player may have picked up voluntarily, so discard that inference.
+          unknownValueCeilings.delete(move.playerId);
+        }
+        knownHand.delete(card.id);
+      }
+      historicalPile.push(...move.cards);
+    }
+  }
+
+  const knownHands = new Map<number, Card[]>();
+  for (const [opponentId, cardsById] of knownByPlayer) {
+    const knownCards = [...cardsById.values()];
+    knownHands.set(opponentId, knownCards);
+    if (opponentId === playerId) continue;
+    for (const card of knownCards) counts.set(card.value, (counts.get(card.value) || 0) - 1);
+  }
+
+  return { knownHands, unknownCounts: counts, unknownValueCeilings };
+}
+
+function probabilityOpponentCanAnswer(tracker: OpponentCardTracker, state: GameState, opponentId: number, value: number) {
+  const opponent = state.players.find(player => player.id === opponentId);
+  if (!opponent || opponent.hasFinished) return 0;
+  const knownCards = tracker.knownHands.get(opponentId) ?? [];
+  if (knownCards.some(card => card.value >= value)) return 1;
+
+  const unknownSlots = Math.max(0, opponent.hand.length - knownCards.length);
+  const unknownCeiling = tracker.unknownValueCeilings.get(opponentId);
+  // A pickup after a failed response tells us the player's pre-existing
+  // hidden cards were below that pile top. Keep a little uncertainty because
+  // human players may sometimes choose to pick up voluntarily.
+  if (unknownCeiling !== undefined && value >= unknownCeiling) return unknownSlots > 0 ? 0.08 : 0;
+
+  let total = 0, ge = 0;
+  for (let v = 9; v <= 14; v++) {
+    if (unknownCeiling !== undefined && v >= unknownCeiling) continue;
+    const c = Math.max(0, tracker.unknownCounts.get(v) || 0);
+    total += c;
+    if (v >= value) ge += c;
+  }
+  if (total <= 0 || unknownSlots <= 0 || ge <= 0) return 0;
+  const below = total - ge;
+  if (unknownSlots > below) return 1;
+
+  // Cards are sampled without replacement. In a two-player game the unknown
+  // pool is exactly the other player's unknown hand, making this deduction exact.
+  let probabilityNoAnswer = 1;
+  for (let draw = 0; draw < unknownSlots; draw++) {
+    probabilityNoAnswer *= (below - draw) / (total - draw);
+  }
+  return 1 - probabilityNoAnswer;
+}
+
+// -----------------------------
+// Rule enforcement helpers
+// -----------------------------
+function returnTakeMove(takeType: 'take3' | 'takeAll') {
+  return { type: 'take' as const, cards: [] as Card[], takeType };
+}
+
+/**
+ * enforceNoSkipDecision
+ * - Ensures AI never returns an illegal endTurn when actions exist.
+ * - If pile has only 9♦ (pile.length === 1), taking is impossible; force a play from hand.
+ * - Accepts optional playerHand to construct forced plays when necessary.
+ */
+function enforceNoSkipDecision(
+  possiblePlays: Card[][],
+  bestMove: { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' } | null,
   pile: Card[],
-  state: GameState,
-  playerId: number
-): number {
-  let score = 0;
+  options: GameOptions,
+  playerHand?: Card[]
+): AIMove {
+  // If bestMove is a valid play, return it
+  if (bestMove && bestMove.type === 'play' && bestMove.cards && bestMove.cards.length > 0) {
+    return bestMove;
+  }
+
+  // Preserve the AI's chosen pickup size. Previously this helper silently
+  // replaced every take-three decision with take-all whenever that option was on.
+  if (bestMove?.type === 'take') return bestMove;
+
+  // If any possible plays exist, return the first one
+  if (possiblePlays && possiblePlays.length > 0) {
+    return { type: 'play', cards: possiblePlays[0] };
+  }
+
+  // Special case: pile only contains 9♦ (pile length === 1)
+  // Taking is impossible; AI must play if it has cards.
+  if (pile.length === 1 && playerHand && playerHand.length > 0) {
+    // 1) opening special nines
+    const nines = playerHand.filter(c => c.value === 9);
+    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
+    // 2) 4-of-a-kind
+    const fourVal = hasFourOfSameValue(playerHand);
+    if (fourVal !== null) {
+      const fourCards = getCardsOfSameValue(playerHand, fourVal);
+      if (fourCards.length === 4) return { type: 'play', cards: fourCards };
+    }
+    // 3) play lowest single (always legal because top is 9)
+    const sorted = [...playerHand].sort((a, b) => a.value - b.value);
+    return { type: 'play', cards: [sorted[0]] };
+    // If bestMove is 'endTurn', replace with a play move
+    // Inside the block
+    if (bestMove && bestMove.type === 'endTurn') {
+      if (possiblePlays && possiblePlays.length > 0) {
+        return { type: 'play', cards: possiblePlays[0] };
+      }
+      // This fallback is for scenario where no moves available
+      // Always play the lowest card in hand
+      const sortedHand = [...playerHand].sort((a, b) => a.value - b.value);
+      if (sortedHand.length > 0) {
+        return { type: 'play', cards: [sortedHand[0]] };
+      }
+    }
+  }
   
+  // Prevent ending turn if only 9♦ on pile and no prior combo
+  if (
+    pile.length === 1 &&
+    pile[0].value === 9 &&
+    pile[0].suit === 'diamonds' &&
+    bestMove?.type === 'endTurn'
+  ) {
+    // Force a play instead
+    if (possiblePlays && possiblePlays.length > 0) {
+      return { type: 'play', cards: possiblePlays[0] };
+    }
+    // fallback: play lowest card
+    if (playerHand && playerHand.length > 0) {
+      const sortedHand = [...playerHand].sort((a, b) => a.value - b.value);
+      return { type: 'play', cards: [sortedHand[0]] };
+    }
+  }
+  
+  // Otherwise choose a take if allowed
+  const takeOpts = getTakeOptions(pile, options);
+  if (takeOpts.canTake3) return { type: 'take' as const, cards: [], takeType: 'take3' };
+  if (takeOpts.canTakeAll) return { type: 'take' as const, cards: [], takeType: 'takeAll' };
+
+  // fallback: if no other move, try to force a take
+  if (playerHand && playerHand.length > 0) {
+    return { type: 'play', cards: [playerHand[0]] };
+  }
+  return { type: 'play', cards: [] }; // default fallback
+}
+
+// -----------------------------
+// Play generation & evaluation
+// -----------------------------
+function evaluateNineAceTrap(hand: Card[], pile: Card[], state: GameState, playerId: number) {
+  const opponentInfo = estimateOpponentStrength(state, playerId);
+  if (!opponentInfo.isOneVOne) return { canPlay: false, score: 0, cards: [] as Card[] };
+  if (!(pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds')) return { canPlay: false, score: 0, cards: [] as Card[] };
+  const nines = hand.filter(c => c.value === 9);
+  if (nines.length < 3) return { canPlay: false, score: 0, cards: [] as Card[] };
+  const aces = hand.filter(c => c.value === 14);
+  if (aces.length === 0) return { canPlay: false, score: 0, cards: [] as Card[] };
+  const tens = hand.filter(c => c.value === 10);
+  const jacks = hand.filter(c => c.value === 11);
+  const queens = hand.filter(c => c.value === 12);
+  const hasFourTens = tens.length === 4;
+  const hasFourJacks = jacks.length === 4;
+  const hasFourQueens = queens.length === 4;
+  let trapBonus = SCORE_WEIGHTS.NINE_PLUS_ACE_TRAP_BONUS;
+  if (hasFourTens || hasFourJacks || hasFourQueens) trapBonus += SCORE_WEIGHTS.FOUR_OF_KIND_TRAP_BONUS;
+  const cards = [...nines.slice(0, 3), aces[0]];
+  const remainingHand = hand.filter(c => !cards.some(pc => pc.id === c.id));
+  const remainingHighCards = countHighCards(remainingHand);
+  if (remainingHighCards.total >= 2) trapBonus += SCORE_WEIGHTS.PRESERVE_HIGH_CARDS_BONUS;
+  return { canPlay: true, score: trapBonus, cards };
+}
+
+function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state: GameState, playerId: number) {
+  let score = 0;
   const remainingHand = hand.filter(c => !cardsToPlay.find(pc => pc.id === c.id));
   const pileAnalysis = analyzePile(pile);
   const opponentInfo = estimateOpponentStrength(state, playerId);
-  
-  // WINNING MOVE - Highest priority
-  if (remainingHand.length === 0) {
-    return SCORE_WEIGHTS.WINNING_MOVE_BONUS;
-  }
-  
-  // Close to finishing
-  if (remainingHand.length <= 3) {
-    score += SCORE_WEIGHTS.CAN_FINISH_SOON_BONUS * (4 - remainingHand.length) / 3;
-  }
-  
-  // Hand composition after play
+
+  if (remainingHand.length === 0) return SCORE_WEIGHTS.WINNING_MOVE_BONUS;
+  if (remainingHand.length <= 3) score += SCORE_WEIGHTS.CAN_FINISH_SOON_BONUS * (4 - remainingHand.length) / 3;
   score += evaluateHandComposition(remainingHand);
-  
-  // Card value considerations
+
   const playValue = cardsToPlay[0].value;
-  
-  // Prefer playing lower cards to preserve high cards
-  // BUT sometimes playing high is strategic
-  if (playValue <= 10) {
-    score += SCORE_WEIGHTS.PLAY_LOW_CARDS_BONUS;
+
+  if (playValue >= 11) {
+    const highCardCount = cardsToPlay.length;
+    score += SCORE_WEIGHTS.HIGH_CARD_PENALTY * highCardCount;
+    if (playValue === 14) score += SCORE_WEIGHTS.ACE_PENALTY * highCardCount;
+    if (cardsToPlay.length === 4 && playValue === 14) {
+      const aceDecision = shouldPlayFourAces(hand, pile, state, playerId);
+      if (!aceDecision.shouldPlay) score += SCORE_WEIGHTS.FOUR_ACES_PENALTY;
+    }
   }
-  
-  // Strategic high card play
+
+  const remainingHighCards = countHighCards(remainingHand);
+  if (remainingHighCards.total >= 2) score += SCORE_WEIGHTS.PRESERVE_HIGH_CARDS_BONUS;
+  if (playValue <= 10) score += SCORE_WEIGHTS.PLAY_LOW_CARDS_BONUS;
+
   if (cardsToPlay.length === 1 && playValue >= 11) {
     score += evaluateForceOpponentTake(cardsToPlay[0], hand, pile, state, playerId);
   }
-  
-  // 4-of-a-kind combo bonus
+
   if (cardsToPlay.length === 4) {
-    score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
-    
-    // Check if we can continue with another good play
-    const fourOfKindValue = hasFourOfSameValue(remainingHand);
-    if (fourOfKindValue !== null) {
-      score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS * 0.4;
+    if (playValue === 14) {
+      const aceDecision = shouldPlayFourAces(hand, pile, state, playerId);
+      if (aceDecision.shouldPlay) score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
+    } else {
+      score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
+      const fourOfKindValue = hasFourOfSameValue(remainingHand);
+      if (fourOfKindValue !== null && fourOfKindValue !== 14) score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS * 0.4;
     }
   }
-  
-  // Special 9's combo
-  if (cardsToPlay.length === 3 && cardsToPlay.every(c => c.value === 9)) {
-    score += SCORE_WEIGHTS.NINE_TRIPLE_BONUS;
-  }
-  
-  // Position considerations
+
+  if (cardsToPlay.length === 3 && cardsToPlay.every(c => c.value === 9)) score += SCORE_WEIGHTS.NINE_TRIPLE_BONUS;
+
   const myCardCount = remainingHand.length;
-  
-  if (myCardCount < opponentInfo.avgOpponentCards) {
-    score += SCORE_WEIGHTS.LEADING_POSITION_BONUS;
-  }
-  
-  // Block opponent close to winning
+  if (myCardCount < opponentInfo.avgOpponentCards) score += SCORE_WEIGHTS.LEADING_POSITION_BONUS;
+
   if (opponentInfo.opponentCloseToWin) {
     score += SCORE_WEIGHTS.OPPONENT_CLOSE_TO_WIN_PENALTY;
-    
-    // But if we can play high to block, that's good
-    if (playValue >= 12) {
-      score += SCORE_WEIGHTS.BLOCKING_OPPONENT_BONUS;
-    }
+    if (playValue >= 12) score += SCORE_WEIGHTS.BLOCKING_OPPONENT_BONUS;
   }
-  
+
   return score;
 }
 
-// Evaluate taking cards - MUCH MORE CONSERVATIVE
-function evaluateTakeMove(
-  takeCount: number,
-  hand: Card[],
-  pile: Card[],
-  state: GameState,
-  playerId: number
-): number {
-  // Base penalty for taking cards - we want to AVOID taking
-  let score = SCORE_WEIGHTS.TAKING_CARDS_BASE_PENALTY;
-  
-  const cardsToTake = pile.slice(-takeCount);
+function evaluateHandComposition(hand: Card[]) {
+  let score = 0;
+  const valueCounts = new Map<number, number>();
+  for (const card of hand) valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
+  for (const [value, count] of valueCounts) {
+    if (count === 4) {
+      score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
+      if (value === 9) score += SCORE_WEIGHTS.NINE_QUAD_BONUS;
+    } else if (count === 3) {
+      if (value === 9) score += SCORE_WEIGHTS.NINE_TRIPLE_BONUS;
+      else score += SCORE_WEIGHTS.THREE_OF_A_KIND_PENALTY;
+    } else if (count === 2) {
+      score += SCORE_WEIGHTS.TWO_OF_A_KIND_BONUS;
+    }
+  }
+  score += hand.length * SCORE_WEIGHTS.CARDS_REMAINING_PENALTY;
+  return score;
+}
+
+function evaluateForceOpponentTake(cardToPlay: Card, hand: Card[], pile: Card[], state: GameState, playerId: number) {
+  let bonus = 0;
+  const pileAnalysis = analyzePile(pile);
   const opponentInfo = estimateOpponentStrength(state, playerId);
-  
-  // ============================================================
-  // ONLY TAKE IF HIGHLY BENEFICIAL
-  // ============================================================
-  
-  // Check 1: Would this complete a 4-of-a-kind?
-  const quadCheck = wouldCompleteQuad(hand, cardsToTake);
-  if (quadCheck.wouldComplete) {
-    score += SCORE_WEIGHTS.TAKING_COMPLETES_QUAD_BONUS;
+  if (cardToPlay.value >= 13) {
+    if (opponentInfo.strongestOpponent && opponentInfo.strongestOpponent.hand.length <= 4) bonus += SCORE_WEIGHTS.FORCE_OPPONENT_TAKE_BONUS;
+    if (pileAnalysis.hasLowCards) bonus += SCORE_WEIGHTS.UNCOVER_LOW_CARDS_BONUS;
   }
-  
-  // Check 2: Would this fix a bad 3-of-a-kind?
-  if (wouldFixTriple(hand, cardsToTake)) {
-    score += SCORE_WEIGHTS.TAKING_USEFUL_CARDS_BONUS;
+  if (cardToPlay.value >= 11 && cardToPlay.value <= 12) {
+    if (opponentInfo.opponentCloseToWin) bonus += SCORE_WEIGHTS.PLAYING_HIGH_TO_BLOCK;
   }
-  
-  // Check 3: Would we get high cards (K, A)?
-  if (wouldGetHighCards(cardsToTake)) {
-    score += SCORE_WEIGHTS.TAKING_HIGH_CARDS_BONUS;
-  }
-  
-  // Check 4: Are we leading? If so, taking is WORSE
-  const myCardCount = hand.length;
-  if (myCardCount < opponentInfo.avgOpponentCards - 2) {
-    score += SCORE_WEIGHTS.TAKING_WHEN_LEADING_PENALTY;
-  }
-  
-  // Check 5: Is opponent about to win? Maybe take to block
-  if (opponentInfo.opponentCloseToWin) {
-    // Only consider taking if it would give us combo potential
-    if (quadCheck.wouldComplete) {
-      score += 30; // Worth taking to try to win
-    }
-  }
-  
-  // Check 6: Evaluate hand composition change
-  const currentHandScore = evaluateHandComposition(hand);
-  const newHandScore = evaluateHandComposition([...hand, ...cardsToTake]);
-  const handChange = newHandScore - currentHandScore;
-  
-  // Only add positive change if it's significant
-  if (handChange > 20) {
-    score += handChange * 0.5;
-  }
-  
-  return score;
+  return bonus;
 }
 
-// ============================================================
-// GET POSSIBLE PLAYS - ENFORCES CARD ORDERING FOR ALL MOVES
-// ============================================================
+function shouldPlayFourAces(hand: Card[], pile: Card[], state: GameState, playerId: number) {
+  const aces = hand.filter(c => c.value === 14);
+  if (aces.length !== 4) return { shouldPlay: false, reason: "Don't have 4 Aces" };
+  const topCard = pile[pile.length - 1];
+  if (topCard && topCard.value > 14) return { shouldPlay: false, reason: "Can't play Aces on higher card" };
+  const opponentInfo = estimateOpponentStrength(state, playerId);
+  if (hand.length === 4) return { shouldPlay: true, reason: "Last 4 cards - winning move!" };
+  if (opponentInfo.opponentCloseToWin && hand.length <= 6) return { shouldPlay: true, reason: "Blocking opponent win attempt" };
+  if (opponentInfo.isOneVOne) {
+    const remainingHand = hand.filter(c => c.value !== 14);
+    const fourOfKindValue = hasFourOfSameValue(remainingHand);
+    if (fourOfKindValue !== null) return { shouldPlay: true, reason: "Can follow up with another 4-of-a-kind" };
+  }
+  return { shouldPlay: false, reason: "Preserving Aces for critical moment" };
+}
+
+// -----------------------------
+// Possible plays generator (limited set)
+// -----------------------------
 function getPossiblePlays(hand: Card[], pile: Card[], options: GameOptions): Card[][] {
   const plays: Card[][] = [];
   const topCard = pile[pile.length - 1];
   const isFirstMove = pile.length === 1 && topCard.suit === 'diamonds' && topCard.value === 9;
-  
-  // Group cards by value
   const cardsByValue = new Map<number, Card[]>();
   for (const card of hand) {
-    if (!cardsByValue.has(card.value)) {
-      cardsByValue.set(card.value, []);
-    }
+    if (!cardsByValue.has(card.value)) cardsByValue.set(card.value, []);
     cardsByValue.get(card.value)!.push(card);
   }
-  
-  // ============================================================
-  // SPECIAL CASE: First move (9 of diamonds is on table)
-  // ============================================================
+
   if (isFirstMove) {
+    // The 9 of diamonds is already on the pile when the first player acts.
+    // They may play any legal card, including the optional other nines.
     const nines = cardsByValue.get(9) || [];
-    
-    // Can play 1 nine on 9 of diamonds
-    if (nines.length >= 1) {
-      plays.push([nines[0]]);
+    if (nines.length >= 1) plays.push([nines[0]]);
+    if (options.specialNinesRule && nines.length >= 3) plays.push(nines.slice(0, 3));
+    for (const [value, cards] of cardsByValue) {
+      if (value >= topCard.value) plays.push([cards[0]]);
+      if (options.fourOfAKindRule && value >= topCard.value && cards.length === 4) plays.push(cards);
     }
-    
-    // Can play 3 nines (special combo) on 9 of diamonds
-    if (nines.length >= 3) {
-      plays.push(nines.slice(0, 3));
-    }
-    
-    // Can play 4 nines if allowed (special rule for 4 nines)
-    if (nines.length === 4 && options.allowFourNinesStart) {
-      plays.push(nines);
-    }
-    
     return plays;
   }
-  
-  // ============================================================
-  // REGULAR PLAYS - ENFORCE CARD ORDERING RULES
-  // ============================================================
-  
-  // Rule: Card must be >= top card value
-  // This applies to ALL plays including 4-of-a-kind!
-  
+
   for (const [value, cards] of cardsByValue) {
-    // Check if this value can be played on top card
     const canPlayOnTop = value >= topCard.value;
-    
     if (canPlayOnTop) {
-      // Can play single card
       plays.push([cards[0]]);
-      
-      // Can also play 2 of same value (if we have them)
-      if (cards.length >= 2) {
-        plays.push(cards.slice(0, 2));
-      }
-      
-      // Can also play 3 of same value (if we have them)
-      if (cards.length >= 3) {
-        plays.push(cards.slice(0, 3));
-      }
-      
-      // Can play 4 of a kind - BUT STILL MUST FOLLOW ORDERING!
-      // 4 tens can only be played if top card is 9 or 10
-      // 4 queens can only be played if top card is 9, 10, J, or Q
-      if (cards.length === 4) {
-        plays.push(cards);
-      }
+      if (cards.length >= 2) plays.push(cards.slice(0, 2));
+      if (cards.length >= 3) plays.push(cards.slice(0, 3));
+      if (cards.length === 4) plays.push(cards);
     }
-    // REMOVED: The exception that allowed 4-of-a-kind to be played anytime
-    // Now 4-of-a-kind MUST also follow the ordering rule
   }
-  
   return plays;
 }
 
-// Main AI move selection
-export function getAIMove(state: GameState, playerId: number): {
-  type: 'play' | 'take' | 'endTurn';
-  cards: Card[];
-  takeType?: 'take3' | 'takeAll';
-} {
-  const player = state.players.find(p => p.id === playerId);
-  if (!player) {
-    return { type: 'endTurn', cards: [] };
+function isUnnecessaryAceOnOpening(cardsToPlay: Card[], hand: Card[], pile: Card[]) {
+  const isOpeningPile = pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds';
+  if (!isOpeningPile || !cardsToPlay.some(card => card.value === 14)) return false;
+
+  const remainingHand = hand.filter(card => !cardsToPlay.some(played => played.id === card.id));
+  // Keep a winning play, but save the Ace when any lower card can open instead.
+  if (remainingHand.length === 0) return false;
+  return remainingHand.some(card => card.value < 14);
+}
+
+export function getAIMoveCandidates(state: GameState, playerId: number, continuingTurn = state.canContinueTurn): AIMove[] {
+  const player = state.players.find(candidate => candidate.id === playerId);
+  if (!player || player.hasFinished) return [];
+
+  const isFirstMove = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
+  const possiblePlays = getPossiblePlays(player.hand, state.pile, state.options)
+    .filter(cards => (cards.length !== 4 || state.options.fourOfAKindRule) &&
+      validatePlay(cards, state.pile, isFirstMove, state.options).valid);
+  const candidates: AIMove[] = possiblePlays.map(cards => ({ type: 'play', cards }));
+
+  if (continuingTurn) {
+    candidates.push({ type: 'endTurn', cards: [] });
+  } else if (candidates.length === 0) {
+    const takeOptions = getTakeOptions(state.pile, state.options);
+    if (takeOptions.canTake3) candidates.push({ type: 'take', cards: [], takeType: 'take3' });
+    if (takeOptions.canTakeAll) candidates.push({ type: 'take', cards: [], takeType: 'takeAll' });
   }
-  
+
+  const seen = new Set<string>();
+  return candidates.filter(candidate => {
+    const key = candidate.type === 'play'
+      ? `play:${candidate.cards.map(card => card.id).sort().join(',')}`
+      : `${candidate.type}:${candidate.takeType ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// -----------------------------
+// Candidate generation (small set) for Hard AI
+// -----------------------------
+function generateCandidates(state: GameState, playerId: number) {
+  const player = state.players.find(p => p.id === playerId)!;
   const hand = player.hand;
   const pile = state.pile;
   const options = state.options;
-  const difficulty = options.aiDifficulty;
-  
-  if (difficulty === 'easy') {
-    return getEasyAIMove(hand, pile, options);
-  }
-  
-  if (difficulty === 'medium') {
-    return getMediumAIMove(hand, pile, options, state, playerId);
-  }
-  
-  return getHardAIMove(state, playerId);
-}
-
-function getEasyAIMove(
-  hand: Card[],
-  pile: Card[],
-  options: GameOptions
-): { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' } {
   const topCard = pile[pile.length - 1];
-  const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
-  
-  // Special 9's on first move
+  const isFirstMove = pile.length === 1 && topCard.value === 9 && topCard.suit === 'diamonds';
+
+  const candidates: any[] = [];
+  const legalSingles = hand.filter(c => c.value >= topCard.value);
+  for (const card of legalSingles) candidates.push({ type: 'play', cards: [card] });
+
+  const byVal = new Map<number, Card[]>();
+  for (const c of hand) {
+    if (!byVal.has(c.value)) byVal.set(c.value, []);
+    byVal.get(c.value)!.push(c);
+  }
+  for (const [val, cards] of byVal) {
+    if (cards.length === 4 && val >= topCard.value && options.fourOfAKindRule) candidates.push({ type: 'play', cards: cards.slice() });
+  }
+
   if (isFirstMove) {
-    const nines = hand.filter(c => c.value === 9);
-    if (nines.length >= 3) {
-      return { type: 'play', cards: nines.slice(0, 3) };
-    }
-    if (nines.length >= 1) {
-      return { type: 'play', cards: [nines[0]] };
-    }
+    const nines = (byVal.get(9) || []);
+    if (options.specialNinesRule && nines.length >= 3) candidates.push({ type: 'play', cards: nines.slice(0, 3) });
+    if (nines.length >= 1) candidates.push({ type: 'play', cards: [nines[0]] });
   }
-  
-  // Check for 4 of a kind - MUST follow ordering now
-  const fourValue = hasFourOfSameValue(hand);
-  if (fourValue !== null && fourValue >= topCard.value) {
-    const fourCards = getCardsOfSameValue(hand, fourValue);
-    return { type: 'play', cards: fourCards };
-  }
-  
-  // Play lowest valid card (must be >= top card value)
-  const validCards = hand.filter(c => c.value >= topCard.value);
-  if (validCards.length > 0) {
-    validCards.sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [validCards[0]] };
-  }
-  
-  // Must take
+
+  // The rules require a take only when no legal play exists.
   const takeOpts = getTakeOptions(pile, options);
-  return { type: 'take', cards: [], takeType: takeOpts.canTakeAll ? 'takeAll' : 'take3' };
+  if (candidates.length === 0) {
+    if (takeOpts.canTakeAll) candidates.push({ type: 'take', takeType: 'takeAll', cards: [] });
+    if (takeOpts.canTake3) candidates.push({ type: 'take', takeType: 'take3', cards: [] });
+  }
+
+  // Deduplicate
+  const sigs = new Set<string>();
+  const uniq: any[] = [];
+  for (const c of candidates) {
+    const sig = c.type === 'take' ? `take-${c.takeType}` : `play-${c.cards.map((x: Card) => x.id).join(',')}`;
+    if (!sigs.has(sig)) { sigs.add(sig); uniq.push(c); }
+  }
+  return uniq;
 }
 
-function getMediumAIMove(
-  hand: Card[],
-  pile: Card[],
-  options: GameOptions,
-  state: GameState,
-  playerId: number
-): { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' } {
-  const topCard = pile[pile.length - 1];
-  const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
-  
-  // Special 9's on first move
-  if (isFirstMove) {
-    const nines = hand.filter(c => c.value === 9);
-    if (nines.length === 4 && options.allowFourNinesStart) {
-      return { type: 'play', cards: nines };
+// -----------------------------
+// Candidate evaluation (Hard AI)
+// -----------------------------
+function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
+  const player = state.players.find(p => p.id === playerId)!;
+  const hand = player.hand;
+  const pile = state.pile;
+  const tracker = buildOpponentCardTracker(state, playerId);
+  const opponentInfo = estimateOpponentStrength(state, playerId);
+
+  const deltaHand = candidate.type === 'play' ? candidate.cards.length : 0;
+  let score = 0;
+
+  if (candidate.type === 'take') {
+    const takeOptions = getTakeOptions(pile, state.options);
+    const takeCount = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
+    const cardsToTake = pile.slice(-takeCount);
+    const topValue = pile[pile.length - 1].value;
+    // Taking cards is a cost. Reward a pickup only when it creates a legal
+    // four of a kind or adds cards that can answer the current top card.
+    score -= takeCount * 45;
+    const handCounts = new Map<number, number>();
+    for (const card of hand) handCounts.set(card.value, (handCounts.get(card.value) ?? 0) + 1);
+    for (const card of cardsToTake) {
+      if (card.value >= topValue && (handCounts.get(card.value) ?? 0) === 3) {
+        score += 95;
+        handCounts.set(card.value, 4);
+      } else if (card.value >= topValue) {
+        score += 4;
+      }
     }
-    if (nines.length >= 3) {
-      return { type: 'play', cards: nines.slice(0, 3) };
+    if (opponentInfo.opponentCloseToWin && cardsToTake.some(card => card.value >= topValue)) score += 12;
+    return score;
+  }
+
+  // Getting rid of cards matters, but keeping flexible high cards matters too.
+  score += 18 * deltaHand;
+
+  const myCards = hand.length;
+  const endgame = myCards <= 4 || opponentInfo.opponentCloseToWin;
+  if (endgame) score += 20;
+
+  if (candidate.type === 'play') {
+    for (const c of candidate.cards) {
+      // A higher card is more flexible later, so its cost rises with rank.
+      const preservationCost = Math.pow(c.value - 9, 1.35) * 2.6;
+      score -= preservationCost + (c.value === 14 ? 8 : c.value === 13 ? 4 : 0);
     }
-    if (nines.length >= 1) {
-      return { type: 'play', cards: [nines[0]] };
+    // Prefer the lowest card that still makes the next player spend a higher
+    // card or pick up. This avoids wasting an Ace when a King does the job.
+    const playedValue = candidate.cards[0].value;
+    const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
+    const nextPlayer = state.players[nextIdx];
+    if (nextPlayer && !nextPlayer.hasFinished) {
+      const nextHandSize = nextPlayer.hand.length;
+      const forceProbability = 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue);
+      if (nextHandSize <= 1) score += 55 * forceProbability;
+      else if (nextHandSize <= 2) score += 35 * forceProbability;
+      else if (nextHandSize <= 3) score += 25 * forceProbability;
+      else score += 18 * forceProbability;
+      // Retaining multiple high cards gives options on later turns.
+      score += Math.min(3, hand.filter(c => c.value >= 12).length) * (playedValue >= 13 ? 4 : 0);
     }
   }
-  
-  // Check for 4 of a kind - MUST follow ordering now
-  const fourValue = hasFourOfSameValue(hand);
-  if (fourValue !== null && fourValue >= topCard.value) {
-    const fourCards = getCardsOfSameValue(hand, fourValue);
-    return { type: 'play', cards: fourCards };
+
+  if (candidate.type === 'play' && candidate.cards.length === 4) {
+    // A legal four of a kind sheds four cards and grants a continuation.
+    // That tempo is valuable even for Aces, which also lock the pile at 14.
+    score += 110;
+    if (candidate.cards[0].value === 14) score += 35;
   }
-  
-  // Play lowest valid card (must be >= top card value)
-  const validCards = hand.filter(c => c.value >= topCard.value);
-  if (validCards.length > 0) {
-    validCards.sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [validCards[0]] };
+
+  const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
+  const nextPlayer = state.players[nextIdx];
+  const newTop = candidate.type === 'play' ? candidate.cards[candidate.cards.length - 1].value : pile[pile.length - 1].value;
+  const probNextCanPlay = nextPlayer
+    ? probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, newTop)
+    : 0;
+  const forceProb = 1 - probNextCanPlay;
+  score += 10 * forceProb;
+
+  if (opponentInfo.opponentCloseToWin) {
+    if (candidate.type === 'play' && candidate.cards.some((c: Card) => c.value >= 12)) score += 25;
+    if (candidate.type === 'take') score += 15;
   }
-  
-  // Must take
-  const takeOpts = getTakeOptions(pile, options);
-  return { type: 'take', cards: [], takeType: takeOpts.canTakeAll ? 'takeAll' : 'take3' };
+
+  const remainingAfter = candidate.type === 'play' ? hand.filter(h => !candidate.cards.find((c: Card) => c.id === h.id)) : hand;
+  const remCounts = new Map<number, number>();
+  for (const c of remainingAfter) remCounts.set(c.value, (remCounts.get(c.value) || 0) + 1);
+  for (const [v, cnt] of remCounts) {
+    if (cnt === 3 && v !== 14) score += 20;
+    if (cnt >= 2 && v >= 11) score += 6;
+  }
+
+  const trap = evaluateNineAceTrap(hand, pile, state, playerId);
+  if (trap.canPlay && candidate.type === 'play' && candidate.cards.length === 4 && candidate.cards.every((c: Card) => c.value === 9 || c.value === 14)) {
+    score += trap.score;
+  }
+
+  const enableProb = nextPlayer
+    ? probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, newTop + 1)
+    : 0;
+  score -= 8 * enableProb;
+
+  return score;
 }
 
-function getHardAIMove(
-  state: GameState,
-  playerId: number
-): { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' } {
+// -----------------------------
+// Fast simulator helpers for rollouts
+// -----------------------------
+function fastCloneStateForSim(state: GameState): GameState {
+  return JSON.parse(JSON.stringify(state)) as GameState;
+}
+
+function applyCandidateToSim(sim: GameState, playerId: number, candidate: any) {
+  const player = sim.players.find(p => p.id === playerId)!;
+  if (candidate.type === 'play') {
+    for (const c of candidate.cards) {
+      const idx = player.hand.findIndex((h: Card) => h.id === c.id);
+      if (idx >= 0) player.hand.splice(idx, 1);
+      sim.pile.push(c);
+    }
+  } else {
+    const takeCount = candidate.takeType === 'takeAll' ? Math.max(0, sim.pile.length - 1) : Math.min(3, Math.max(0, sim.pile.length - 1));
+    const taken = sim.pile.splice(sim.pile.length - takeCount, takeCount);
+    player.hand.push(...taken);
+  }
+}
+
+function simulateFastPlayout(sim: GameState, aiPlayerId: number, maxSteps = 200): number {
+  let currentIdx = sim.players.findIndex(p => !p.hasFinished && p.hand.length > 0);
+  if (currentIdx === -1) return aiPlayerId;
+  let steps = 0;
+  while (steps < maxSteps) {
+    const player = sim.players[currentIdx];
+    if (!player || player.hasFinished) {
+      currentIdx = (currentIdx + 1) % sim.players.length;
+      steps++;
+      continue;
+    }
+    if (player.hand.length === 0) {
+      player.hasFinished = true;
+      const unfinished = sim.players.filter(p => !p.hasFinished);
+      if (unfinished.length === 1) return unfinished[0].id;
+      currentIdx = (currentIdx + 1) % sim.players.length;
+      steps++;
+      continue;
+    }
+    const top = sim.pile[sim.pile.length - 1];
+    const legal = player.hand.filter((c: Card) => c.value >= top.value);
+    if (legal.length > 0) {
+      legal.sort((a: Card, b: Card) => a.value - b.value);
+      const play = legal[0];
+      const idx = player.hand.findIndex((h: Card) => h.id === play.id);
+      if (idx >= 0) player.hand.splice(idx, 1);
+      sim.pile.push(play);
+    } else {
+      const takeOpts = getTakeOptions(sim.pile, sim.options);
+      if (takeOpts.canTake3) {
+        const takeCount = Math.min(3, Math.max(0, sim.pile.length - 1));
+        const taken = sim.pile.splice(sim.pile.length - takeCount, takeCount);
+        player.hand.push(...taken);
+      } else if (takeOpts.canTakeAll) {
+        const takeCount = Math.max(0, sim.pile.length - 1);
+        const taken = sim.pile.splice(sim.pile.length - takeCount, takeCount);
+        player.hand.push(...taken);
+      }
+    }
+    if (player.hand.length === 0) {
+      player.hasFinished = true;
+      const unfinished = sim.players.filter(p => !p.hasFinished);
+      if (unfinished.length === 1) return unfinished[0].id;
+      if (player.id === aiPlayerId) return aiPlayerId;
+    }
+    currentIdx = (currentIdx + 1) % sim.players.length;
+    steps++;
+  }
+  const finished = sim.players.find(p => p.hand.length === 0);
+  if (finished) return finished.id;
+  return sim.players[Math.floor(Math.random() * sim.players.length)].id;
+}
+
+function monteCarloEstimate(state: GameState, playerId: number, candidate: any, playouts = 30) {
+  let wins = 0;
+  for (let i = 0; i < playouts; i++) {
+    const sim = fastCloneStateForSim(state);
+    applyCandidateToSim(sim, playerId, candidate);
+    const winner = simulateFastPlayout(sim, playerId, 200);
+    if (winner === playerId) wins++;
+  }
+  return wins / playouts;
+}
+
+// -----------------------------
+// Hard AI
+// -----------------------------
+function isHighImpactCandidate(candidate: any, handSize: number) {
+  if (candidate.type === 'play' && candidate.cards.length === 4) return true;
+  if (candidate.type === 'play' && candidate.cards.length === handSize) return true;
+  return false;
+}
+
+function getHardAIMove(state: GameState, playerId: number): AIMove {
+  const player = state.players.find(p => p.id === playerId)!;
+  const hand = player.hand;
+  const pile = state.pile;
+  const options = state.options;
+
+  const candidates = generateCandidates(state, playerId);
+  if (!candidates || candidates.length === 0) {
+    const takeOpts = getTakeOptions(pile, options);
+    if (takeOpts.canTake3) return returnTakeMove('take3');
+    if (takeOpts.canTakeAll) return returnTakeMove('takeAll');
+    // No candidates and no take options -> force a play (pile may be only 9♦)
+    const fallback = enforceNoSkipDecision([], null, pile, options, hand);
+    if (fallback.type === 'take') return returnTakeMove(fallback.takeType === 'takeAll' ? 'takeAll' : 'take3');
+    return fallback;
+  }
+
+  const preferredCandidates = candidates.filter(candidate =>
+    candidate.type !== 'play' || !isUnnecessaryAceOnOpening(candidate.cards, hand, pile)
+  );
+  const candidatesToScore = preferredCandidates.length > 0 ? preferredCandidates : candidates;
+  const scored = candidatesToScore.map(c => ({ c, score: evaluateCandidate(state, playerId, c) }));
+  scored.sort((a, b) => b.score - a.score);
+
+  const bestMove = scored[0].c;
+
+  // Keep the decision based on public information. The previous rollout used
+  // the real opponent hands, which gave the AI information a human player
+  // cannot have and made its estimates unreliable for actual play.
+
+// 
+const possiblePlays = getPossiblePlays(player.hand, pile, options);
+const safeDecision = enforceNoSkipDecision(possiblePlays, bestMove, pile, options, player.hand);
+
+if (safeDecision.type === 'take') return returnTakeMove(safeDecision.takeType === 'takeAll' ? 'takeAll' : 'take3');
+return safeDecision;
+
+}
+
+// -----------------------------
+// Medium AI (previous hard logic moved here)
+// -----------------------------
+function getMediumAIMove(state: GameState, playerId: number): AIMove {
   const player = state.players.find(p => p.id === playerId)!;
   const hand = player.hand;
   const pile = state.pile;
   const options = state.options;
   const topCard = pile[pile.length - 1];
   const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
-  
+
+  const opponentInfo = estimateOpponentStrength(state, playerId);
+
   const possiblePlays = getPossiblePlays(hand, pile, options);
   const takeOpts = getTakeOptions(pile, options);
-  
-  let bestMove: { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' } | null = null;
+
+  let bestMove: any = null;
   let bestScore = -Infinity;
-  
-  // ============================================================
-  // EVALUATE ALL PLAY MOVES
-  // ============================================================
-  
+
   for (const playCards of possiblePlays) {
+    if (isUnnecessaryAceOnOpening(playCards, hand, pile)) continue;
     const validation = validatePlay(playCards, pile, isFirstMove, options);
     if (validation.valid) {
       const score = evaluatePlayMove(playCards, hand, pile, state, playerId);
-      
-      // Bonus for combo continuation
       if (validation.continueTurn && playCards.length === 4) {
         const remainingHand = hand.filter(c => !playCards.find(pc => pc.id === c.id));
         if (remainingHand.length > 0) {
@@ -608,26 +864,17 @@ function getHardAIMove(
           }
         }
       }
-      
       if (score > bestScore) {
         bestScore = score;
         bestMove = { type: 'play', cards: playCards };
       }
     }
   }
-  
-  // ============================================================
-  // EVALUATE TAKE MOVES - ONLY IF NO GOOD PLAY EXISTS
-  // ============================================================
-  
-  // Check if we have any valid plays
+
   const hasValidPlays = possiblePlays.length > 0;
-  
-  if (!hasValidPlays || takeOpts.canTakeAll) {
-    // Check if taking would complete a quad
+  if (!hasValidPlays && takeOpts.canTakeAll) {
     const cardsToTake = pile.slice(-takeOpts.takeAllCount);
     const quadCheck = wouldCompleteQuad(hand, cardsToTake);
-    
     if (quadCheck.wouldComplete) {
       const takeScore = evaluateTakeMove(takeOpts.takeAllCount, hand, pile, state, playerId);
       if (takeScore > bestScore) {
@@ -636,37 +883,132 @@ function getHardAIMove(
       }
     }
   }
-  
-  // If we have no valid plays, we MUST take
+
   if (!hasValidPlays && !bestMove) {
     if (takeOpts.canTakeAll) {
-      // Check if taking all is beneficial
       const takeAllScore = evaluateTakeMove(takeOpts.takeAllCount, hand, pile, state, playerId);
       const take3Score = evaluateTakeMove(takeOpts.take3Count, hand, pile, state, playerId);
-      
-      if (takeAllScore > take3Score) {
-        bestMove = { type: 'take', cards: [], takeType: 'takeAll' };
-      } else {
-        bestMove = { type: 'take', cards: [], takeType: 'take3' };
-      }
+      if (takeAllScore > take3Score) bestMove = { type: 'take', cards: [], takeType: 'takeAll' };
+      else bestMove = { type: 'take', cards: [], takeType: 'take3' };
     } else if (takeOpts.canTake3) {
       bestMove = { type: 'take', cards: [], takeType: 'take3' };
     }
   }
-  
-  // Fallback
+
   if (!bestMove) {
-    if (takeOpts.canTake3) {
-      bestMove = { type: 'take', cards: [], takeType: 'take3' };
-    } else {
-      bestMove = { type: 'endTurn', cards: [] };
-    }
+    if (takeOpts.canTake3) bestMove = { type: 'take', cards: [], takeType: 'take3' };
+    bestMove = hand.length > 0 ? { type: 'play', cards: [hand[0]] } : { type: 'endTurn', cards: [] };
   }
-  
-  return bestMove;
+
+  const safeDecision = enforceNoSkipDecision(possiblePlays, bestMove, pile, options, hand);
+  if (safeDecision.type === 'take') return returnTakeMove(safeDecision.takeType === 'takeAll' ? 'takeAll' : 'take3');
+  return safeDecision;
 }
 
-// Continue turn logic
+function evaluateTakeMove(takeCount: number, hand: Card[], pile: Card[], state: GameState, playerId: number) {
+  let score = SCORE_WEIGHTS.TAKING_CARDS_BASE_PENALTY - takeCount * 12;
+  const cardsToTake = pile.slice(-takeCount);
+  const opponentInfo = estimateOpponentStrength(state, playerId);
+  const quadCheck = wouldCompleteQuad(hand, cardsToTake);
+  if (quadCheck.wouldComplete) score += SCORE_WEIGHTS.TAKING_COMPLETES_QUAD_BONUS;
+  if (wouldFixTriple(hand, cardsToTake)) score += SCORE_WEIGHTS.TAKING_USEFUL_CARDS_BONUS;
+  if (wouldGetHighCards(cardsToTake)) score += SCORE_WEIGHTS.TAKING_HIGH_CARDS_BONUS;
+  const myCardCount = hand.length;
+  if (myCardCount < opponentInfo.avgOpponentCards - 2) score += SCORE_WEIGHTS.TAKING_WHEN_LEADING_PENALTY;
+  if (opponentInfo.opponentCloseToWin) {
+    if (quadCheck.wouldComplete) score += 30;
+  }
+  const currentHandScore = evaluateHandComposition(hand);
+  const newHandScore = evaluateHandComposition([...hand, ...cardsToTake]);
+  const handChange = newHandScore - currentHandScore;
+  score += handChange * 0.75;
+  return score;
+}
+
+// -----------------------------
+// Main AI entrypoint
+// -----------------------------
+export function getAIMove(state: GameState, playerId: number): AIMove {
+  const player = state.players.find(p => p.id === playerId);
+  if (!player) return { type: 'endTurn', cards: [] };
+
+  const options = state.options;
+  const difficulty = options.aiDifficulty;
+
+  if (difficulty === 'easy') return getEasyAIMove(player.hand, state.pile, options);
+  if (difficulty === 'medium') return getMediumAIMove(state, playerId);
+
+  const move = getHardAIMove(state, playerId);
+
+  // Check for the specific scenario with only 9♦ on pile
+  if (
+    move.type === 'endTurn' &&
+    state.pile.length === 1
+  ) {
+    // Always play lowest card instead of ending turn
+    const sortedHand = [...player.hand].sort((a, b) => a.value - b.value);
+    return { type: 'play', cards: [sortedHand[0]] };
+  }
+
+  // Otherwise, follow the normal move
+  if (move.type === 'endTurn') {
+    // Already handled above, but just a fallback
+    const possiblePlays = getPossiblePlays(player.hand, state.pile, options);
+    const fallback = enforceNoSkipDecision(
+      possiblePlays,
+      null,
+      state.pile,
+      options,
+      player.hand
+    );
+    if (fallback.type === 'take') return returnTakeMove(fallback.takeType === 'takeAll' ? 'takeAll' : 'take3');
+    return fallback;
+  } else {
+    return move;
+  }
+}
+
+// -----------------------------
+// Easy AI
+// -----------------------------
+function getEasyAIMove(hand: Card[], pile: Card[], options: GameOptions): AIMove {
+  const topCard = pile[pile.length - 1];
+  const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
+  if (isFirstMove) {
+    const nines = hand.filter(c => c.value === 9);
+    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
+    if (nines.length >= 1) return { type: 'play', cards: [nines[0]] };
+  }
+  const fourValue = hasFourOfSameValue(hand);
+  if (fourValue !== null && fourValue >= topCard.value) {
+    const fourCards = getCardsOfSameValue(hand, fourValue);
+    if (!isUnnecessaryAceOnOpening(fourCards, hand, pile)) return { type: 'play', cards: fourCards };
+  }
+  const validCards = hand.filter(c => c.value >= topCard.value);
+  if (validCards.length > 0) {
+    validCards.sort((a, b) => a.value - b.value);
+    return { type: 'play', cards: [validCards[0]] };
+  }
+    const takeOpts = getTakeOptions(pile, options);
+
+  // If pile is only 9♦ and hand exists, force a play (cannot take)
+  if (pile.length === 1 && hand.length > 0) {
+    // The opening special move is the three remaining nines, never a mixed set.
+    const nines = hand.filter(c => c.value === 9);
+    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
+    const fourVal = hasFourOfSameValue(hand);
+    if (fourVal !== null) return { type: 'play', cards: getCardsOfSameValue(hand, fourVal) };
+    const sorted = [...hand].sort((a, b) => a.value - b.value);
+    return { type: 'play', cards: [sorted[0]] };
+  }
+
+  return { type: 'take', cards: [], takeType: takeOpts.canTake3 ? 'take3' : 'takeAll' };
+
+}
+
+// -----------------------------
+// Continue-turn logic (only PLAY or END TURN)
+// -----------------------------
 export function getContinueTurnMove(
   hand: Card[],
   pile: Card[],
@@ -675,54 +1017,75 @@ export function getContinueTurnMove(
   state: GameState,
   playerId: number
 ): { type: 'play' | 'endTurn'; cards: Card[] } {
-  if (difficulty === 'easy') {
-    return { type: 'endTurn', cards: [] };
-  }
-  
   const topCard = pile[pile.length - 1];
-  
-  if (difficulty === 'hard') {
-    const possiblePlays = getPossiblePlays(hand, pile, options);
-    
-    let bestPlay: Card[] | null = null;
-    let bestScore = -Infinity;
-    
-    for (const playCards of possiblePlays) {
-      const validation = validatePlay(playCards, pile, false, options);
-      if (validation.valid) {
-        const score = evaluatePlayMove(playCards, hand, pile, state, playerId);
-        if (score > bestScore) {
-          bestScore = score;
-          bestPlay = playCards;
-        }
-      }
+  const isFirstMove = pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds';
+  const possiblePlays = getPossiblePlays(hand, pile, options);
+
+  // If no possible plays but pile is only 9♦, force a play from hand
+  if ((!possiblePlays || possiblePlays.length === 0) && pile.length === 1 && hand.length > 0) {
+    const nines = hand.filter(c => c.value === 9);
+    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
+    const fourVal = hasFourOfSameValue(hand);
+    if (fourVal !== null) return { type: 'play', cards: getCardsOfSameValue(hand, fourVal) };
+    const sorted = [...hand].sort((a, b) => a.value - b.value);
+    return { type: 'play', cards: [sorted[0]] };
+  }
+
+  if (!possiblePlays || possiblePlays.length === 0) return { type: 'endTurn', cards: [] };
+
+  let best: Card[] | null = null;
+  let bestScore = -Infinity;
+  for (const play of possiblePlays) {
+    if (isUnnecessaryAceOnOpening(play, hand, pile)) continue;
+    const validation = validatePlay(play, pile, isFirstMove, options);
+    if (!validation.valid) continue;
+    const score = evaluatePlayMove(play, hand, pile, state, playerId);
+    if (score > bestScore) {
+      bestScore = score;
+      best = play;
     }
-    
-    // Only continue if beneficial
-    if (bestPlay && bestScore > 0) {
-      return { type: 'play', cards: bestPlay };
-    }
-    
-    return { type: 'endTurn', cards: [] };
   }
-  
-  // Medium difficulty
-  const playableCards = hand.filter(c => c.value >= topCard.value);
-  const fourValue = hasFourOfSameValue(hand);
-  
-  // 4 of a kind must follow ordering
-  if (fourValue !== null && fourValue >= topCard.value) {
-    return { type: 'play', cards: getCardsOfSameValue(hand, fourValue) };
+  // after scoring and before returning endTurn in getContinueTurnMove
+if (best && best.length > 0) return { type: 'play', cards: best };
+
+  // If pile is only 9♦ and hand exists, force a play from hand (cannot take)
+  if (pile.length === 1 && hand.length > 0) {
+    const nines = hand.filter(c => c.value === 9);
+    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
+    const fourVal = hasFourOfSameValue(hand);
+    if (fourVal !== null) return { type: 'play', cards: getCardsOfSameValue(hand, fourVal) };
+    const sorted = [...hand].sort((a, b) => a.value - b.value);
+    return { type: 'play', cards: [sorted[0]] };
   }
-  
-  if (playableCards.length > 0) {
-    playableCards.sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [playableCards[0]] };
-  }
-  
+
+  // Otherwise end turn (only when truly no options)
   return { type: 'endTurn', cards: [] };
+
 }
 
-export function getAIDelay(): number {
-  return 800 + Math.random() * 700;
+
+// -----------------------------
+// Return AI thinking delay in milliseconds for a given difficulty.
+// - easy: short delay
+// - medium: moderate delay
+// - hard: longer delay with small random jitter
+//
+// Keep delays small enough for UX but large enough to feel natural.
+// -----------------------------
+export function getAIDelay(difficulty: AIDifficulty): number {
+  // base delays (ms)
+  const BASE = {
+    easy: 500,
+    medium: 1000, // previous "hard" behavior moved to medium
+    hard: 1500
+  } as Record<AIDifficulty, number>;
+
+  const base = BASE[difficulty] ?? 400;
+
+  // Add a small random jitter so AI doesn't feel robotic
+  const jitter = Math.floor(Math.random() * 200) - 100; // -100..+99 ms
+
+  // Cap to a sensible range
+  const delay = Math.max(100, base + jitter);
+  return delay;
 }
