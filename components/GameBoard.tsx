@@ -17,7 +17,7 @@ import {
   playCardSound, playTakeSound, playComboSound,
   playWinSound, playLoseSound, playYourTurnSound, playClickSound,
 } from '../utils/sounds';
-import { ArrowRight, Clock, RotateCcw, Home, AlertCircle, Pause, Play, Zap, History, ChevronDown, ChevronUp, Crown, Skull, Volume2, VolumeX } from 'lucide-react';
+import { ArrowRight, Clock, RotateCcw, Home, AlertCircle, Pause, Play, Zap, History, ChevronDown, ChevronUp, Crown, Skull, Volume2, VolumeX, Download } from 'lucide-react';
 
 interface GameBoardProps {
   gameState: any;
@@ -150,7 +150,7 @@ function AIFeedbackDialog({
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-emerald-700 pt-3">
           <p className="text-xs text-emerald-300">Saved on this device. Opponents’ hidden cards are excluded.</p>
           <div className="flex gap-2">
-            <button onClick={onExport} className="text-xs font-medium text-amber-300 hover:text-amber-200">Export JSON</button>
+            <button onClick={onExport} className="text-xs font-medium text-amber-300 hover:text-amber-200">Export evaluations</button>
             <button onClick={onSkip} className="text-xs font-medium text-emerald-300 hover:text-white">Skip</button>
           </div>
         </div>
@@ -394,14 +394,18 @@ export function GameBoard({
         onPlayCardsRef.current(player.id, [], false);
       }
 
-      setFeedbackMode('rating');
-      setFeedbackError(null);
-      setPendingAIFeedback({
-        stateBeforeMove: state,
-        playerId: player.id,
-        chosenMove: executedMove,
-        candidates: getAIMoveCandidates(state, player.id, state.canContinueTurn),
-      });
+      const feedbackCandidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
+      const hadMoveChoice = feedbackCandidates.some(candidate => candidate.type === 'play');
+      if (hadMoveChoice) {
+        setFeedbackMode('rating');
+        setFeedbackError(null);
+        setPendingAIFeedback({
+          stateBeforeMove: state,
+          playerId: player.id,
+          chosenMove: executedMove,
+          candidates: feedbackCandidates,
+        });
+      }
       setIsAIThinking(false);
     };
 
@@ -527,7 +531,7 @@ export function GameBoard({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = 'bobby-ai-feedback.json';
+    anchor.download = 'bobby-ai-evaluations.json';
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -627,6 +631,13 @@ export function GameBoard({
               New Game
             </button>
           </div>
+          <button
+            onClick={downloadAIFeedback}
+            className="w-full mt-3 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Export AI evaluations ({feedbackCount})
+          </button>
         </div>
         {feedbackDialog}
       </div>
