@@ -42,4 +42,4 @@ pnpm simulate:ai -- --games=100 --players=3 --protagonist=hard --opponent=medium
 
 Supported strategies are `easy`, `medium`, and `hard`. Use `--max-turns=5000` to change the per-game decision limit. A repeated full game position is reported as a draw.
 
-During play, rate each computer move as good or bad. For a bad move, select a legal alternative or record the correction without one. Feedback is saved in browser storage and can be downloaded as `bobby-ai-feedback.json` from the prompt. The saved decision context includes the AI's own hand and public game history, but not opponents' hidden cards.
+During play, rate each computer move as good or bad. For a bad move, select a legal alternative—including taking cards when the AI played—or record the correction without one. Feedback is saved in browser storage and can be downloaded as `bobby-ai-evaluations.json` from the prompt or the game-over screen. The saved decision context includes the AI's own hand and public game history, but not opponents' hidden cards. Medium and hard AI compare legal plays against taking three or all available cards; taking is also considered when no legal play exists.
