@@ -1,28 +1,34 @@
 /**
  * Compiled move statistics from all three supplied demonstration files:
- * 342 unique decisions across 17 two-player games. Per-state examples,
+ * 455 unique decisions across 22 two-player games. Per-state examples,
  * including the opponent's last public action, live in humanMoveTrainingData.ts.
  */
 export const HUMAN_MOVE_TRAINING = {
-  records: 342,
-  games: 17,
+  records: 455,
+  games: 22,
   pileTopChoices: {
-    9: { states: 96, takes: 0 },
-    10: { states: 50, takes: 0 },
-    11: { states: 46, takes: 0 },
-    12: { states: 53, takes: 3 },
-    13: { states: 59, takes: 31 },
-    14: { states: 38, takes: 28 },
+    9: { states: 129, takes: 0 },
+    10: { states: 66, takes: 0 },
+    11: { states: 60, takes: 0 },
+    12: { states: 74, takes: 5 },
+    13: { states: 76, takes: 39 },
+    14: { states: 50, takes: 38 },
   },
   highPileChoices: {
-    13: { states: 59, takes: 31 },
-    14: { states: 38, takes: 28 },
+    13: { states: 76, takes: 39 },
+    14: { states: 50, takes: 38 },
+  },
+  highCardControl: {
+    highSinglePlays: 139,
+    highSinglesWithLowerAlternative: 69,
+    highSinglesWithLowerAlternativeAndAnotherHighKept: 69,
+    highSinglesLeavingOneCardAndKeepingAnotherHigh: 9,
   },
   quadBreaks: {
-    quadInHandStates: 207,
-    singleBreaks: 35,
-    breaksByRank: { 12: 4, 13: 22, 14: 9 },
-    breaksByPileTop: { 9: 1, 10: 7, 11: 12, 12: 15 },
+    quadInHandStates: 279,
+    singleBreaks: 44,
+    breaksByRank: { 11: 1, 12: 7, 13: 25, 14: 11 },
+    breaksByPileTop: { 9: 1, 10: 10, 11: 16, 12: 17 },
     breaksOnNine: 1,
   },
 } as const;

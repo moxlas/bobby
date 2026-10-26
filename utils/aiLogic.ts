@@ -616,6 +616,86 @@ function evaluateForceOpponentTake(cardToPlay: Card, hand: Card[], pile: Card[],
   return bonus;
 }
 
+function evaluateHighCardControl(
+  cardsToPlay: Card[],
+  hand: Card[],
+  pile: Card[],
+  state: GameState,
+  playerId: number,
+  tracker = buildOpponentCardTracker(state, playerId),
+) {
+  if (cardsToPlay.length !== 1 || cardsToPlay[0].value < 13) return 0;
+  const playedValue = cardsToPlay[0].value;
+  const remainingHand = hand.filter(card => card.id !== cardsToPlay[0].id);
+  if (remainingHand.length === 0) return 0;
+
+  const topValue = pile[pile.length - 1]?.value ?? 9;
+  const highCardsBefore = hand.filter(card => card.value >= 13).length;
+  const highCardsAfter = remainingHand.filter(card => card.value >= 13).length;
+  const lowerLegalAlternative = hand.some(card => card.value >= topValue && card.value < playedValue);
+  const opponentInfo = estimateOpponentStrength(state, playerId);
+  let score = 0;
+
+  // In the combined human data, all 69 high singles played while a lower
+  // legal answer existed still left a King or Ace in hand. Preserve the last
+  // high control card unless the pile makes it a necessary response or it
+  // blocks an opponent who is close to finishing.
+  if (highCardsBefore === 1 && highCardsAfter === 0) {
+    const reserveCost = lowerLegalAlternative
+      ? (remainingHand.length <= 3 ? 135 : 110)
+      : topValue >= 14 ? 22 : topValue >= 13 ? 38 : 72;
+    score -= opponentInfo.opponentCloseToWin ? reserveCost * 0.3 : reserveCost;
+  }
+
+  // A high card can be worth spending when it makes the opponent pick up and
+  // leaves exactly one card that becomes playable after that pickup. Humans
+  // chose take-three in 74 of 77 high-pile pickup examples, so weight that
+  // likely response heavily and keep take-all as a small alternative.
+  if (remainingHand.length === 1) {
+    const nextIndex = getNextPlayerIndex(state.players.findIndex(player => player.id === playerId), state.players);
+    const nextPlayer = state.players[nextIndex];
+    const forceProbability = nextPlayer
+      ? 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue)
+      : 0;
+    const pileAfterPlay = [...pile, ...cardsToPlay];
+    const takeOptions = getTakeOptions(pileAfterPlay, state.options);
+    const canPlayAfterTake = (takeCount: number) => {
+      const remainingPile = pileAfterPlay.slice(0, Math.max(1, pileAfterPlay.length - takeCount));
+      const newTop = remainingPile[remainingPile.length - 1]?.value ?? 0;
+      return remainingHand[0].value >= newTop;
+    };
+    if (takeOptions.canTake3) {
+      if (canPlayAfterTake(takeOptions.take3Count)) score += 185 * forceProbability * (takeOptions.canTakeAll ? 0.96 : 1);
+    }
+    if (takeOptions.canTakeAll && canPlayAfterTake(takeOptions.takeAllCount)) {
+      const takeAllWeight = takeOptions.canTake3 ? 0.04 : 1;
+      score += 185 * forceProbability * takeAllWeight;
+    }
+
+    // A forced pickup also transfers our played high card to the opponent.
+    // Price that gift when tracking says a response is unlikely, unless the
+    // pickup is the line that lets us shed our final card immediately after.
+    const likelyTakeProbability = forceProbability;
+    const likelyTakeCount = takeOptions.canTake3 ? takeOptions.take3Count : takeOptions.takeAllCount;
+    const highCardsOffered = pileAfterPlay
+      .slice(-likelyTakeCount)
+      .filter(card => card.value >= 13)
+      .length;
+    const finalCardEscape = remainingHand.length === 1 && takeOptions.canTake3 &&
+      canPlayAfterTake(takeOptions.take3Count) && forceProbability >= 0.6;
+    if (!finalCardEscape) score -= 38 * likelyTakeProbability * highCardsOffered;
+
+    // If the opponent can answer, playing into that answer is risky unless the
+    // final card is still high enough to beat the response.
+    if (nextPlayer && remainingHand[0].value < playedValue) {
+      const answerProbability = 1 - forceProbability;
+      score -= 120 * answerProbability;
+    }
+  }
+
+  return score;
+}
+
 function shouldPlayFourAces(hand: Card[], pile: Card[], state: GameState, playerId: number) {
   const aces = hand.filter(c => c.value === 14);
   if (aces.length !== 4) return { shouldPlay: false, reason: "Don't have 4 Aces" };
@@ -835,6 +915,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
   if (endgame) score += 20;
 
   if (candidate.type === 'play') {
+    score += evaluateHighCardControl(candidate.cards, hand, pile, state, playerId, tracker);
     if (candidate.cards.length === hand.length) score += SCORE_WEIGHTS.WINNING_MOVE_BONUS;
     for (const c of candidate.cards) {
       // A higher card is more flexible later, so its cost rises with rank.
@@ -1002,6 +1083,7 @@ function chooseRolloutMove(state: GameState, playerId: number): AIMove {
 
   const candidates = getAIMoveCandidates(state, playerId);
   if (candidates.length === 0) return { type: 'endTurn', cards: [] };
+  const tracker = buildOpponentCardTracker(state, playerId);
   let bestMove = candidates[0];
   let bestScore = -Infinity;
 
@@ -1011,7 +1093,8 @@ function chooseRolloutMove(state: GameState, playerId: number): AIMove {
   for (const candidate of candidates) {
     if (candidate.type === 'play' && !shouldUseFourOfAKind(candidate.cards, player.hand, state, playerId)) continue;
     let score = candidate.type === 'play'
-      ? evaluatePlayMove(candidate.cards, player.hand, state.pile, state, playerId)
+      ? evaluatePlayMove(candidate.cards, player.hand, state.pile, state, playerId) +
+        evaluateHighCardControl(candidate.cards, player.hand, state.pile, state, playerId, tracker)
       : candidate.type === 'take'
         ? evaluateTakeMove(
             candidate.takeType === 'takeAll'
@@ -1428,6 +1511,7 @@ export function getContinueTurnMove(
 
   if (!possiblePlays || possiblePlays.length === 0) return { type: 'endTurn', cards: [] };
 
+  const hardTracker = difficulty === 'hard' ? buildOpponentCardTracker(state, playerId) : undefined;
   let best: Card[] | null = null;
   let bestScore = -Infinity;
   for (const play of possiblePlays) {
@@ -1436,6 +1520,7 @@ export function getContinueTurnMove(
     const validation = validatePlay(play, pile, isFirstMove, options);
     if (!validation.valid) continue;
     const score = evaluatePlayMove(play, hand, pile, state, playerId) +
+      (difficulty === 'hard' ? evaluateHighCardControl(play, hand, pile, state, playerId, hardTracker) : 0) +
       (difficulty === 'hard' ? getHumanDemonstrationScore(state, playerId, { type: 'play', cards: play }) : 0);
     if (score > bestScore) {
       bestScore = score;
