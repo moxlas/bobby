@@ -1,30 +1,29 @@
 /**
- * Compiled expert move statistics from the two supplied
- * bobby-human-demonstrations-v1 files. The files contained 217 unique
- * decisions across 11 two-player games; these counts are the training signal
- * used by the AI without bundling the raw observation logs into the game.
+ * Compiled move statistics from all three supplied demonstration files:
+ * 342 unique decisions across 17 two-player games. Per-state examples,
+ * including the opponent's last public action, live in humanMoveTrainingData.ts.
  */
 export const HUMAN_MOVE_TRAINING = {
-  records: 217,
-  games: 11,
+  records: 342,
+  games: 17,
   pileTopChoices: {
-    9: { states: 53, takes: 0 },
-    10: { states: 32, takes: 0 },
-    11: { states: 34, takes: 0 },
-    12: { states: 33, takes: 2 },
-    13: { states: 41, takes: 23 },
-    14: { states: 24, takes: 20 },
+    9: { states: 96, takes: 0 },
+    10: { states: 50, takes: 0 },
+    11: { states: 46, takes: 0 },
+    12: { states: 53, takes: 3 },
+    13: { states: 59, takes: 31 },
+    14: { states: 38, takes: 28 },
   },
   highPileChoices: {
-    13: { states: 41, takes: 23 },
-    14: { states: 24, takes: 20 },
+    13: { states: 59, takes: 31 },
+    14: { states: 38, takes: 28 },
   },
   quadBreaks: {
-    quadInHandStates: 145,
-    singleBreaks: 20,
-    breaksByRank: { 12: 1, 13: 13, 14: 6 },
-    breaksByPileTop: { 10: 3, 11: 7, 12: 10 },
-    breaksOnNine: 0,
+    quadInHandStates: 207,
+    singleBreaks: 35,
+    breaksByRank: { 12: 4, 13: 22, 14: 9 },
+    breaksByPileTop: { 9: 1, 10: 7, 11: 12, 12: 15 },
+    breaksOnNine: 1,
   },
 } as const;
 
