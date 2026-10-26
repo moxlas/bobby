@@ -518,7 +518,7 @@ export function getAIMoveCandidates(state: GameState, playerId: number, continui
 
   if (continuingTurn) {
     candidates.push({ type: 'endTurn', cards: [] });
-  } else if (candidates.length === 0) {
+  } else {
     const takeOptions = getTakeOptions(state.pile, state.options);
     if (takeOptions.canTake3) candidates.push({ type: 'take', cards: [], takeType: 'take3' });
     if (takeOptions.canTakeAll) candidates.push({ type: 'take', cards: [], takeType: 'takeAll' });
@@ -565,12 +565,10 @@ function generateCandidates(state: GameState, playerId: number) {
     if (nines.length >= 1) candidates.push({ type: 'play', cards: [nines[0]] });
   }
 
-  // The rules require a take only when no legal play exists.
+  // The player may choose a pickup when a legal play exists.
   const takeOpts = getTakeOptions(pile, options);
-  if (candidates.length === 0) {
-    if (takeOpts.canTakeAll) candidates.push({ type: 'take', takeType: 'takeAll', cards: [] });
-    if (takeOpts.canTake3) candidates.push({ type: 'take', takeType: 'take3', cards: [] });
-  }
+  if (takeOpts.canTake3) candidates.push({ type: 'take', takeType: 'take3', cards: [] });
+  if (takeOpts.canTakeAll) candidates.push({ type: 'take', takeType: 'takeAll', cards: [] });
 
   // Deduplicate
   const sigs = new Set<string>();
@@ -600,14 +598,15 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     const takeCount = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
     const cardsToTake = pile.slice(-takeCount);
     const topValue = pile[pile.length - 1].value;
-    // Taking cards is a cost. Reward a pickup only when it creates a legal
-    // four of a kind or adds cards that can answer the current top card.
-    score -= takeCount * 45;
+    // Taking adds cards, but can be useful when it improves hand structure or
+    // creates a four of a kind that can be shed on a later turn.
+    score -= takeCount * 18;
+    score += (evaluateHandComposition([...hand, ...cardsToTake]) - evaluateHandComposition(hand)) * 1.1;
     const handCounts = new Map<number, number>();
     for (const card of hand) handCounts.set(card.value, (handCounts.get(card.value) ?? 0) + 1);
     for (const card of cardsToTake) {
       if (card.value >= topValue && (handCounts.get(card.value) ?? 0) === 3) {
-        score += 95;
+        score += 120;
         handCounts.set(card.value, 4);
       } else if (card.value >= topValue) {
         score += 4;
@@ -871,27 +870,20 @@ function getMediumAIMove(state: GameState, playerId: number): AIMove {
     }
   }
 
-  const hasValidPlays = possiblePlays.length > 0;
-  if (!hasValidPlays && takeOpts.canTakeAll) {
-    const cardsToTake = pile.slice(-takeOpts.takeAllCount);
-    const quadCheck = wouldCompleteQuad(hand, cardsToTake);
-    if (quadCheck.wouldComplete) {
-      const takeScore = evaluateTakeMove(takeOpts.takeAllCount, hand, pile, state, playerId);
-      if (takeScore > bestScore) {
-        bestScore = takeScore;
-        bestMove = { type: 'take', cards: [], takeType: 'takeAll' };
-      }
+  // Picking up is a strategic choice even when a legal play exists. Compare
+  // both available pickup sizes against the best legal play.
+  if (takeOpts.canTake3) {
+    const take3Score = evaluateTakeMove(takeOpts.take3Count, hand, pile, state, playerId);
+    if (take3Score > bestScore) {
+      bestScore = take3Score;
+      bestMove = { type: 'take', cards: [], takeType: 'take3' };
     }
   }
-
-  if (!hasValidPlays && !bestMove) {
-    if (takeOpts.canTakeAll) {
-      const takeAllScore = evaluateTakeMove(takeOpts.takeAllCount, hand, pile, state, playerId);
-      const take3Score = evaluateTakeMove(takeOpts.take3Count, hand, pile, state, playerId);
-      if (takeAllScore > take3Score) bestMove = { type: 'take', cards: [], takeType: 'takeAll' };
-      else bestMove = { type: 'take', cards: [], takeType: 'take3' };
-    } else if (takeOpts.canTake3) {
-      bestMove = { type: 'take', cards: [], takeType: 'take3' };
+  if (takeOpts.canTakeAll) {
+    const takeAllScore = evaluateTakeMove(takeOpts.takeAllCount, hand, pile, state, playerId);
+    if (takeAllScore > bestScore) {
+      bestScore = takeAllScore;
+      bestMove = { type: 'take', cards: [], takeType: 'takeAll' };
     }
   }
 
