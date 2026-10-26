@@ -1,1212 +1,1266 @@
-import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
-import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
-import { getNextPlayerIndex, getTakeOptions, validatePlay, playCards, takeCards, endTurn } from './gameLogic';
+import { useState, useEffect, useRef } from 'react';
+import { Card as CardType, GameOptions, PlayerMove } from '../types/game';
+import { PlayerHand } from './PlayerHand';
+import { GamePile } from './GamePile';
+import { Card } from './Card';
+import { ConfirmPopup } from './ConfirmPopup';
+import { validatePlay, getTakeOptions, getValidMoves } from '../utils/gameLogic';
+import { getAIMove, getAIMoveCandidates, getAIDelay, getContinueTurnMove } from '../utils/aiLogic';
+import {
+  AIFeedbackMove,
+  createAIFeedbackRecord,
+  exportAIFeedback,
+  getAIFeedbackRecords,
+  saveAIFeedback,
+} from '../utils/aiFeedback';
+import {
+  createHumanMoveDemonstration,
+  exportHumanMoveDemonstrations,
+  getHumanMoveDemonstrations,
+  saveHumanMoveDemonstration,
+} from '../utils/humanDemonstrations';
+import {
+  initAudio, setMuted, isMuted,
+  playCardSound, playTakeSound, playComboSound,
+  playWinSound, playLoseSound, playYourTurnSound, playClickSound,
+} from '../utils/sounds';
+import { ArrowRight, Clock, RotateCcw, Home, AlertCircle, Pause, Play, Zap, History, ChevronDown, ChevronUp, Crown, Skull, Volume2, VolumeX, Download, Eye, EyeOff, Minimize2 } from 'lucide-react';
 
-export type AIMove = { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' };
-
-// ============================================================
-// AI logic — updated to guarantee AI never skips a turn.
-// - AI must either PLAY or TAKE when an action is available.
-// - If pile contains only 9♦ (no take possible), AI is forced to play.
-// - Taking ends the turn immediately; once AI plays, taking is illegal.
-// - Continuation phase only returns PLAY or END TURN when truly no options.
-// ============================================================
-
-// -----------------------------
-// Score weights (tunable)
-// -----------------------------
-const SCORE_WEIGHTS = {
-  THREE_OF_A_KIND_PENALTY: -30,
-  TWO_OF_A_KIND_BONUS: 5,
-  FOUR_OF_A_KIND_BONUS: 80,
-  NINE_TRIPLE_BONUS: 40,
-  NINE_QUAD_BONUS: 90,
-
-  HIGH_CARD_PENALTY: -29,
-  ACE_PENALTY: -36,
-  FOUR_ACES_PENALTY: -500,
-  PRESERVE_HIGH_CARDS_BONUS: 15,
-
-  TAKING_CARDS_BASE_PENALTY: -50,
-  TAKING_COMPLETES_QUAD_BONUS: 120,
-  TAKING_HIGH_CARDS_BONUS: 15,
-  TAKING_USEFUL_CARDS_BONUS: 25,
-  TAKING_WHEN_LEADING_PENALTY: -40,
-
-  WINNING_MOVE_BONUS: 2000,
-  CARDS_REMAINING_PENALTY: -15,
-  CAN_FINISH_SOON_BONUS: 200,
-
-  FORCE_OPPONENT_TAKE_BONUS: 45,
-  PLAYING_HIGH_TO_BLOCK: 35,
-  PLAY_LOW_CARDS_BONUS: 5,
-
-  OPPONENT_CLOSE_TO_WIN_PENALTY: -100,
-  BLOCKING_OPPONENT_BONUS: 50,
-  LEADING_POSITION_BONUS: 30,
-
-  UNCOVER_LOW_CARDS_BONUS: 30,
-  OPPONENT_TAKES_BAD_PENALTY: -25,
-
-  NINE_PLUS_ACE_TRAP_BONUS: 150,
-  FOUR_OF_KIND_TRAP_BONUS: 100,
-};
-
-// -----------------------------
-// Utilities & Analysis
-// -----------------------------
-function analyzePile(pile: Card[]) {
-  if (pile.length <= 1) {
-    return {
-      topValue: pile[0]?.value || 0,
-      hasLowCards: false,
-      lowestCard: 14,
-      averageValue: 0,
-      cardValues: [] as number[],
-    };
-  }
-  const values = pile.slice(1).map(c => c.value);
-  const avg = values.reduce((a, b) => a + b, 0) / values.length;
-  return {
-    topValue: pile[pile.length - 1].value,
-    hasLowCards: values.some(v => v <= 10),
-    lowestCard: Math.min(...values),
-    averageValue: avg,
-    cardValues: values,
-  };
+interface GameBoardProps {
+  gameState: any;
+  onPlayCards: (playerId: number, cards: CardType[], continueTurn: boolean) => void;
+  onTakeCards: (playerId: number, count: number) => void;
+  onEndTurn: () => void;
+  onPauseGame: () => void;
+  onResumeGame: () => void;
+  onRestartGame: () => void;
+  onNewGame: () => void;
 }
 
-function wouldCompleteQuad(hand: Card[], cardsToTake: Card[]) {
-  const combined = [...hand, ...cardsToTake];
-  const valueCounts = new Map<number, number>();
-  for (const card of combined) {
-    valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
-  }
-  for (const [value, count] of valueCounts) {
-    if (count === 4) {
-      const hadThreeBefore = hand.filter(c => c.value === value).length === 3;
-      if (hadThreeBefore) {
-        return { wouldComplete: true, value };
-      }
-    }
-  }
-  return { wouldComplete: false, value: null };
+interface PendingAIFeedback {
+  stateBeforeMove: any;
+  playerId: number;
+  chosenMove: AIFeedbackMove;
+  candidates: AIFeedbackMove[];
 }
 
-function wouldGetHighCards(cardsToTake: Card[]) {
-  return cardsToTake.some(c => c.value >= 13);
+function formatTime(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
-function wouldFixTriple(hand: Card[], cardsToTake: Card[]) {
-  const valueCounts = new Map<number, number>();
-  for (const card of hand) {
-    valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
-  }
-  for (const [value, count] of valueCounts) {
-    if (count === 3) {
-      const takingThisValue = cardsToTake.filter(c => c.value === value).length;
-      if (takingThisValue === 1) return true;
-    }
-  }
-  return false;
+function getCardDisplayName(card: CardType): string {
+  const valueStr = card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value.toString();
+  const suitEmoji = card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠';
+  return `${valueStr}${suitEmoji}`;
 }
 
-function countHighCards(hand: Card[]) {
-  let jacks = 0, queens = 0, kings = 0, aces = 0;
-  for (const card of hand) {
-    if (card.value === 11) jacks++;
-    else if (card.value === 12) queens++;
-    else if (card.value === 13) kings++;
-    else if (card.value === 14) aces++;
-  }
-  return { jacks, queens, kings, aces, total: jacks + queens + kings + aces };
+function describeAIFeedbackMove(move: AIFeedbackMove): string {
+  if (move.type === 'play') return `Play ${move.cards.map(getCardDisplayName).join(' ')}`;
+  if (move.type === 'take') return move.takeType === 'takeAll' ? 'Take all available cards' : 'Take up to 3 cards';
+  return 'End the turn';
 }
 
-function estimateOpponentStrength(state: GameState, playerId: number) {
-  const opponents = state.players.filter(p => p.id !== playerId && !p.hasFinished);
-  if (opponents.length === 0) {
-    return {
-      strongestOpponent: null,
-      weakestOpponent: null,
-      avgOpponentCards: 0,
-      opponentCloseToWin: false,
-      isOneVOne: false,
-      humanOpponent: null,
-    };
-  }
-  const sorted = [...opponents].sort((a, b) => a.hand.length - b.hand.length);
-  const humanOpponent = opponents.find(p => !p.isAI) || null;
-  return {
-    strongestOpponent: sorted[0],
-    weakestOpponent: sorted[sorted.length - 1],
-    avgOpponentCards: opponents.reduce((sum, p) => sum + p.hand.length, 0) / opponents.length,
-    opponentCloseToWin: opponents.some(p => p.hand.length <= 2),
-    isOneVOne: opponents.length === 1,
-    humanOpponent,
-  };
+function getAIFeedbackMoveKey(move: AIFeedbackMove): string {
+  if (move.type === 'play') return `play:${move.cards.map(card => card.id).sort().join(',')}`;
+  return `${move.type}:${move.takeType ?? ''}`;
 }
 
-interface OpponentCardTracker {
-  knownHands: Map<number, Card[]>;
-  unknownCounts: Map<number, number>;
-  unknownValueCeilings: Map<number, number>;
+interface AIFeedbackDialogProps {
+  pending: PendingAIFeedback;
+  mode: 'rating' | 'chooseMove';
+  feedbackCount: number;
+  error: string | null;
+  onGood: () => void;
+  onStartBad: () => void;
+  onChoose: (move: AIFeedbackMove) => void;
+  onBadWithoutAlternative: () => void;
+  onBack: () => void;
+  onSkip: () => void;
+  onExport: () => void;
+  showAICards: boolean;
+  onToggleAICards: () => void;
+  onHide: () => void;
 }
 
-function buildOpponentCardTracker(state: GameState, playerId: number): OpponentCardTracker {
-  const counts = new Map<number, number>();
-  for (let v = 9; v <= 14; v++) counts.set(v, 4);
-  for (const card of state.pile) counts.set(card.value, (counts.get(card.value) || 0) - 1);
-  const ownHand = state.players.find(p => p.id === playerId)?.hand ?? [];
-  for (const card of ownHand) counts.set(card.value, (counts.get(card.value) || 0) - 1);
+function AIFeedbackDialog({
+  pending,
+  mode,
+  feedbackCount,
+  error,
+  onGood,
+  onStartBad,
+  onChoose,
+  onBadWithoutAlternative,
+  onBack,
+  onSkip,
+  onExport,
+  showAICards,
+  onToggleAICards,
+  onHide,
+}: AIFeedbackDialogProps) {
+  const alternativeMoves = pending.candidates.filter(
+    candidate => getAIFeedbackMoveKey(candidate) !== getAIFeedbackMoveKey(pending.chosenMove),
+  );
+  const playerName = pending.stateBeforeMove.players.find((player: any) => player.id === pending.playerId)?.name;
+  const aiHand: CardType[] = pending.stateBeforeMove.players.find((player: any) => player.id === pending.playerId)?.hand ?? [];
 
-  // Reconstruct cards that opponents picked up from the public pile and have
-  // not played again. Those cards are known to be in that player's hand.
-  const knownByPlayer = new Map<number, Map<string, Card>>();
-  const unknownValueCeilings = new Map<number, number>();
-  const historicalPile: Card[] = [];
-  for (const player of state.players) knownByPlayer.set(player.id, new Map());
-  for (const move of state.moveHistory) {
-    const knownHand = knownByPlayer.get(move.playerId);
-    if (!knownHand) continue;
-    if (move.type === 'take') {
-      const previousTopValue = historicalPile[historicalPile.length - 1]?.value;
-      if (move.playerId !== playerId && previousTopValue !== undefined) {
-        const oldCeiling = unknownValueCeilings.get(move.playerId);
-        unknownValueCeilings.set(move.playerId, oldCeiling === undefined ? previousTopValue : Math.min(oldCeiling, previousTopValue));
-      }
-      for (const card of move.cards) knownHand.set(card.id, card);
-      historicalPile.splice(Math.max(0, historicalPile.length - move.cards.length), move.cards.length);
-    } else {
-      for (const card of move.cards) {
-        const wasKnownFromPickup = knownHand.has(card.id);
-        const ceiling = unknownValueCeilings.get(move.playerId);
-        if (!wasKnownFromPickup && ceiling !== undefined && card.value >= ceiling) {
-          // The observed play contradicts the old failed-response deduction;
-          // the player may have picked up voluntarily, so discard that inference.
-          unknownValueCeilings.delete(move.playerId);
-        }
-        knownHand.delete(card.id);
-      }
-      historicalPile.push(...move.cards);
-    }
-  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="presentation">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ai-feedback-title"
+        className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-emerald-500 bg-emerald-900 p-5 shadow-2xl sm:p-6"
+      >
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 id="ai-feedback-title" className="text-xl font-bold text-amber-300">
+              {mode === 'rating' ? 'How was that AI move?' : 'Which move would you prefer?'}
+            </h2>
+            <p className="mt-1 text-sm text-emerald-200">{playerName} chose:</p>
+            <p className="mt-1 font-semibold text-white">{describeAIFeedbackMove(pending.chosenMove)}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="rounded-full bg-emerald-800 px-2.5 py-1 text-xs text-emerald-200">{feedbackCount} saved</span>
+            <button onClick={onHide} aria-label="Hide evaluation prompt" title="Hide prompt to inspect the board" className="rounded-lg p-2 text-emerald-200 hover:bg-emerald-800 hover:text-white">
+              <Minimize2 className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
 
-  const knownHands = new Map<number, Card[]>();
-  for (const [opponentId, cardsById] of knownByPlayer) {
-    const knownCards = [...cardsById.values()];
-    knownHands.set(opponentId, knownCards);
-    if (opponentId === playerId) continue;
-    for (const card of knownCards) counts.set(card.value, (counts.get(card.value) || 0) - 1);
-  }
+        <div className="mb-4 rounded-lg border border-emerald-700 bg-emerald-950/40 p-3">
+          <button onClick={onToggleAICards} className="flex w-full items-center justify-between gap-3 text-left text-sm font-medium text-emerald-100" aria-pressed={showAICards}>
+            <span className="flex items-center gap-2">{showAICards ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />} Show AI cards face up</span>
+            <span className={`rounded-full px-2 py-0.5 text-xs ${showAICards ? 'bg-amber-400 text-emerald-950' : 'bg-emerald-800 text-emerald-200'}`}>{showAICards ? 'On' : 'Off'}</span>
+          </button>
+          {showAICards && (
+            <div className="mt-3">
+              <p className="mb-2 text-xs text-emerald-300">{playerName}'s hand before the move ({aiHand.length} cards)</p>
+              <div className="flex max-h-36 flex-wrap justify-center gap-1 overflow-y-auto">
+                {aiHand.map(card => <Card key={card.id} card={{ ...card, faceUp: true }} size="sm" disabled />)}
+              </div>
+            </div>
+          )}
+        </div>
 
-  return { knownHands, unknownCounts: counts, unknownValueCeilings };
-}
+        {mode === 'rating' ? (
+          <div className="grid grid-cols-2 gap-3">
+            <button onClick={onGood} className="rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white transition-colors hover:bg-emerald-500">
+              Good move
+            </button>
+            <button onClick={onStartBad} className="rounded-lg bg-amber-500 px-4 py-3 font-bold text-emerald-950 transition-colors hover:bg-amber-400">
+              Bad move
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {alternativeMoves.map(candidate => (
+              <button
+                key={getAIFeedbackMoveKey(candidate)}
+                onClick={() => onChoose(candidate)}
+                className="w-full rounded-lg border border-emerald-600 bg-emerald-800 px-4 py-3 text-left text-white transition-colors hover:border-amber-400 hover:bg-emerald-700"
+              >
+                {describeAIFeedbackMove(candidate)}
+              </button>
+            ))}
+            {alternativeMoves.length === 0 && (
+              <p className="rounded-lg bg-emerald-800 p-3 text-sm text-emerald-200">There was no other legal move available to select.</p>
+            )}
+            <button onClick={onBadWithoutAlternative} className="w-full rounded-lg border border-amber-500 px-4 py-3 text-left font-medium text-amber-200 transition-colors hover:bg-amber-500/10">
+              Bad move, no suggested alternative
+            </button>
+            <button onClick={onBack} className="w-full rounded-lg px-4 py-2 text-sm text-emerald-300 hover:bg-emerald-800">
+              Back
+            </button>
+          </div>
+        )}
 
-function probabilityOpponentCanAnswer(tracker: OpponentCardTracker, state: GameState, opponentId: number, value: number) {
-  const opponent = state.players.find(player => player.id === opponentId);
-  if (!opponent || opponent.hasFinished) return 0;
-  const knownCards = tracker.knownHands.get(opponentId) ?? [];
-  if (knownCards.some(card => card.value >= value)) return 1;
+        {error && <p role="alert" className="mt-3 text-sm text-red-300">{error}</p>}
 
-  const unknownSlots = Math.max(0, opponent.hand.length - knownCards.length);
-  const unknownCeiling = tracker.unknownValueCeilings.get(opponentId);
-  // A pickup after a failed response tells us the player's pre-existing
-  // hidden cards were below that pile top. Keep a little uncertainty because
-  // human players may sometimes choose to pick up voluntarily.
-  if (unknownCeiling !== undefined && value >= unknownCeiling) return unknownSlots > 0 ? 0.08 : 0;
-
-  let total = 0, ge = 0;
-  for (let v = 9; v <= 14; v++) {
-    if (unknownCeiling !== undefined && v >= unknownCeiling) continue;
-    const c = Math.max(0, tracker.unknownCounts.get(v) || 0);
-    total += c;
-    if (v >= value) ge += c;
-  }
-  if (total <= 0 || unknownSlots <= 0 || ge <= 0) return 0;
-  const below = total - ge;
-  if (unknownSlots > below) return 1;
-
-  // Cards are sampled without replacement. In a two-player game the unknown
-  // pool is exactly the other player's unknown hand, making this deduction exact.
-  let probabilityNoAnswer = 1;
-  for (let draw = 0; draw < unknownSlots; draw++) {
-    probabilityNoAnswer *= (below - draw) / (total - draw);
-  }
-  return 1 - probabilityNoAnswer;
-}
-
-// -----------------------------
-// Rule enforcement helpers
-// -----------------------------
-function returnTakeMove(takeType: 'take3' | 'takeAll') {
-  return { type: 'take' as const, cards: [] as Card[], takeType };
-}
-
-/**
- * enforceNoSkipDecision
- * - Ensures AI never returns an illegal endTurn when actions exist.
- * - If pile has only 9♦ (pile.length === 1), taking is impossible; force a play from hand.
- * - Accepts optional playerHand to construct forced plays when necessary.
- */
-function enforceNoSkipDecision(
-  possiblePlays: Card[][],
-  bestMove: { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' } | null,
-  pile: Card[],
-  options: GameOptions,
-  playerHand?: Card[]
-): AIMove {
-  // If bestMove is a valid play, return it
-  if (bestMove && bestMove.type === 'play' && bestMove.cards && bestMove.cards.length > 0) {
-    return bestMove;
-  }
-
-  // Preserve the AI's chosen pickup size. Previously this helper silently
-  // replaced every take-three decision with take-all whenever that option was on.
-  if (bestMove?.type === 'take') return bestMove;
-
-  // If any possible plays exist, return the first one
-  if (possiblePlays && possiblePlays.length > 0) {
-    return { type: 'play', cards: possiblePlays[0] };
-  }
-
-  // Special case: pile only contains 9♦ (pile length === 1)
-  // Taking is impossible; AI must play if it has cards.
-  if (pile.length === 1 && playerHand && playerHand.length > 0) {
-    // 1) opening special nines
-    const nines = playerHand.filter(c => c.value === 9);
-    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
-    // 2) 4-of-a-kind
-    const fourVal = hasFourOfSameValue(playerHand);
-    if (fourVal !== null) {
-      const fourCards = getCardsOfSameValue(playerHand, fourVal);
-      if (fourCards.length === 4) return { type: 'play', cards: fourCards };
-    }
-    // 3) play lowest single (always legal because top is 9)
-    const sorted = [...playerHand].sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [sorted[0]] };
-    // If bestMove is 'endTurn', replace with a play move
-    // Inside the block
-    if (bestMove && bestMove.type === 'endTurn') {
-      if (possiblePlays && possiblePlays.length > 0) {
-        return { type: 'play', cards: possiblePlays[0] };
-      }
-      // This fallback is for scenario where no moves available
-      // Always play the lowest card in hand
-      const sortedHand = [...playerHand].sort((a, b) => a.value - b.value);
-      if (sortedHand.length > 0) {
-        return { type: 'play', cards: [sortedHand[0]] };
-      }
-    }
-  }
-  
-  // Prevent ending turn if only 9♦ on pile and no prior combo
-  if (
-    pile.length === 1 &&
-    pile[0].value === 9 &&
-    pile[0].suit === 'diamonds' &&
-    bestMove?.type === 'endTurn'
-  ) {
-    // Force a play instead
-    if (possiblePlays && possiblePlays.length > 0) {
-      return { type: 'play', cards: possiblePlays[0] };
-    }
-    // fallback: play lowest card
-    if (playerHand && playerHand.length > 0) {
-      const sortedHand = [...playerHand].sort((a, b) => a.value - b.value);
-      return { type: 'play', cards: [sortedHand[0]] };
-    }
-  }
-  
-  // Otherwise choose a take if allowed
-  const takeOpts = getTakeOptions(pile, options);
-  if (takeOpts.canTake3) return { type: 'take' as const, cards: [], takeType: 'take3' };
-  if (takeOpts.canTakeAll) return { type: 'take' as const, cards: [], takeType: 'takeAll' };
-
-  // fallback: if no other move, try to force a take
-  if (playerHand && playerHand.length > 0) {
-    return { type: 'play', cards: [playerHand[0]] };
-  }
-  return { type: 'play', cards: [] }; // default fallback
-}
-
-// -----------------------------
-// Play generation & evaluation
-// -----------------------------
-function evaluateNineAceTrap(hand: Card[], pile: Card[], state: GameState, playerId: number) {
-  const opponentInfo = estimateOpponentStrength(state, playerId);
-  if (!opponentInfo.isOneVOne) return { canPlay: false, score: 0, cards: [] as Card[] };
-  if (!(pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds')) return { canPlay: false, score: 0, cards: [] as Card[] };
-  const nines = hand.filter(c => c.value === 9);
-  if (nines.length < 3) return { canPlay: false, score: 0, cards: [] as Card[] };
-  const aces = hand.filter(c => c.value === 14);
-  if (aces.length === 0) return { canPlay: false, score: 0, cards: [] as Card[] };
-  const tens = hand.filter(c => c.value === 10);
-  const jacks = hand.filter(c => c.value === 11);
-  const queens = hand.filter(c => c.value === 12);
-  const hasFourTens = tens.length === 4;
-  const hasFourJacks = jacks.length === 4;
-  const hasFourQueens = queens.length === 4;
-  let trapBonus = SCORE_WEIGHTS.NINE_PLUS_ACE_TRAP_BONUS;
-  if (hasFourTens || hasFourJacks || hasFourQueens) trapBonus += SCORE_WEIGHTS.FOUR_OF_KIND_TRAP_BONUS;
-  const cards = [...nines.slice(0, 3), aces[0]];
-  const remainingHand = hand.filter(c => !cards.some(pc => pc.id === c.id));
-  const remainingHighCards = countHighCards(remainingHand);
-  if (remainingHighCards.total >= 2) trapBonus += SCORE_WEIGHTS.PRESERVE_HIGH_CARDS_BONUS;
-  return { canPlay: true, score: trapBonus, cards };
-}
-
-function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state: GameState, playerId: number) {
-  let score = 0;
-  const remainingHand = hand.filter(c => !cardsToPlay.find(pc => pc.id === c.id));
-  const pileAnalysis = analyzePile(pile);
-  const opponentInfo = estimateOpponentStrength(state, playerId);
-
-  if (remainingHand.length === 0) return SCORE_WEIGHTS.WINNING_MOVE_BONUS;
-  if (remainingHand.length <= 3) score += SCORE_WEIGHTS.CAN_FINISH_SOON_BONUS * (4 - remainingHand.length) / 3;
-  score += evaluateHandComposition(remainingHand);
-
-  const playValue = cardsToPlay[0].value;
-
-  if (playValue >= 11) {
-    const highCardCount = cardsToPlay.length;
-    score += SCORE_WEIGHTS.HIGH_CARD_PENALTY * highCardCount;
-    if (playValue === 14) score += SCORE_WEIGHTS.ACE_PENALTY * highCardCount;
-    if (cardsToPlay.length === 4 && playValue === 14) {
-      const aceDecision = shouldPlayFourAces(hand, pile, state, playerId);
-      if (!aceDecision.shouldPlay) score += SCORE_WEIGHTS.FOUR_ACES_PENALTY;
-    }
-  }
-
-  const remainingHighCards = countHighCards(remainingHand);
-  if (remainingHighCards.total >= 2) score += SCORE_WEIGHTS.PRESERVE_HIGH_CARDS_BONUS;
-  if (playValue <= 10) score += SCORE_WEIGHTS.PLAY_LOW_CARDS_BONUS;
-
-  if (cardsToPlay.length === 1 && playValue >= 11) {
-    score += evaluateForceOpponentTake(cardsToPlay[0], hand, pile, state, playerId);
-  }
-
-  if (cardsToPlay.length === 4) {
-    if (playValue === 14) {
-      const aceDecision = shouldPlayFourAces(hand, pile, state, playerId);
-      if (aceDecision.shouldPlay) score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
-    } else {
-      score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
-      const fourOfKindValue = hasFourOfSameValue(remainingHand);
-      if (fourOfKindValue !== null && fourOfKindValue !== 14) score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS * 0.4;
-    }
-  }
-
-  if (cardsToPlay.length === 3 && cardsToPlay.every(c => c.value === 9)) score += SCORE_WEIGHTS.NINE_TRIPLE_BONUS;
-
-  const myCardCount = remainingHand.length;
-  if (myCardCount < opponentInfo.avgOpponentCards) score += SCORE_WEIGHTS.LEADING_POSITION_BONUS;
-
-  if (opponentInfo.opponentCloseToWin) {
-    score += SCORE_WEIGHTS.OPPONENT_CLOSE_TO_WIN_PENALTY;
-    if (playValue >= 12) score += SCORE_WEIGHTS.BLOCKING_OPPONENT_BONUS;
-  }
-
-  return score;
-}
-
-function evaluateHandComposition(hand: Card[]) {
-  let score = 0;
-  const valueCounts = new Map<number, number>();
-  for (const card of hand) valueCounts.set(card.value, (valueCounts.get(card.value) || 0) + 1);
-  for (const [value, count] of valueCounts) {
-    if (count === 4) {
-      score += SCORE_WEIGHTS.FOUR_OF_A_KIND_BONUS;
-      if (value === 9) score += SCORE_WEIGHTS.NINE_QUAD_BONUS;
-    } else if (count === 3) {
-      if (value === 9) score += SCORE_WEIGHTS.NINE_TRIPLE_BONUS;
-      else score += SCORE_WEIGHTS.THREE_OF_A_KIND_PENALTY;
-    } else if (count === 2) {
-      score += SCORE_WEIGHTS.TWO_OF_A_KIND_BONUS;
-    }
-  }
-  score += hand.length * SCORE_WEIGHTS.CARDS_REMAINING_PENALTY;
-  return score;
-}
-
-function evaluateForceOpponentTake(cardToPlay: Card, hand: Card[], pile: Card[], state: GameState, playerId: number) {
-  let bonus = 0;
-  const pileAnalysis = analyzePile(pile);
-  const opponentInfo = estimateOpponentStrength(state, playerId);
-  if (cardToPlay.value >= 13) {
-    if (opponentInfo.strongestOpponent && opponentInfo.strongestOpponent.hand.length <= 4) bonus += SCORE_WEIGHTS.FORCE_OPPONENT_TAKE_BONUS;
-    if (pileAnalysis.hasLowCards) bonus += SCORE_WEIGHTS.UNCOVER_LOW_CARDS_BONUS;
-  }
-  if (cardToPlay.value >= 11 && cardToPlay.value <= 12) {
-    if (opponentInfo.opponentCloseToWin) bonus += SCORE_WEIGHTS.PLAYING_HIGH_TO_BLOCK;
-  }
-  return bonus;
-}
-
-function shouldPlayFourAces(hand: Card[], pile: Card[], state: GameState, playerId: number) {
-  const aces = hand.filter(c => c.value === 14);
-  if (aces.length !== 4) return { shouldPlay: false, reason: "Don't have 4 Aces" };
-  const topCard = pile[pile.length - 1];
-  if (topCard && topCard.value > 14) return { shouldPlay: false, reason: "Can't play Aces on higher card" };
-  const opponentInfo = estimateOpponentStrength(state, playerId);
-  if (hand.length === 4) return { shouldPlay: true, reason: "Last 4 cards - winning move!" };
-  if (opponentInfo.opponentCloseToWin && hand.length <= 6) return { shouldPlay: true, reason: "Blocking opponent win attempt" };
-  if (opponentInfo.isOneVOne) {
-    const remainingHand = hand.filter(c => c.value !== 14);
-    const fourOfKindValue = hasFourOfSameValue(remainingHand);
-    if (fourOfKindValue !== null) return { shouldPlay: true, reason: "Can follow up with another 4-of-a-kind" };
-  }
-  return { shouldPlay: false, reason: "Preserving Aces for critical moment" };
-}
-
-// -----------------------------
-// Possible plays generator (limited set)
-// -----------------------------
-function getPossiblePlays(hand: Card[], pile: Card[], options: GameOptions): Card[][] {
-  const plays: Card[][] = [];
-  const topCard = pile[pile.length - 1];
-  const isFirstMove = pile.length === 1 && topCard.suit === 'diamonds' && topCard.value === 9;
-  const cardsByValue = new Map<number, Card[]>();
-  for (const card of hand) {
-    if (!cardsByValue.has(card.value)) cardsByValue.set(card.value, []);
-    cardsByValue.get(card.value)!.push(card);
-  }
-
-  if (isFirstMove) {
-    // The 9 of diamonds is already on the pile when the first player acts.
-    // They may play any legal card, including the optional other nines.
-    const nines = cardsByValue.get(9) || [];
-    if (nines.length >= 1) plays.push([nines[0]]);
-    if (options.specialNinesRule && nines.length >= 3) plays.push(nines.slice(0, 3));
-    for (const [value, cards] of cardsByValue) {
-      if (value >= topCard.value) plays.push([cards[0]]);
-      if (options.fourOfAKindRule && value >= topCard.value && cards.length === 4) plays.push(cards);
-    }
-    return plays;
-  }
-
-  for (const [value, cards] of cardsByValue) {
-    const canPlayOnTop = value >= topCard.value;
-    if (canPlayOnTop) {
-      plays.push([cards[0]]);
-      if (cards.length >= 2) plays.push(cards.slice(0, 2));
-      if (cards.length >= 3) plays.push(cards.slice(0, 3));
-      if (cards.length === 4) plays.push(cards);
-    }
-  }
-  return plays;
-}
-
-function isUnnecessaryAceOnOpening(cardsToPlay: Card[], hand: Card[], pile: Card[]) {
-  const isOpeningPile = pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds';
-  if (!isOpeningPile || !cardsToPlay.some(card => card.value === 14)) return false;
-
-  const remainingHand = hand.filter(card => !cardsToPlay.some(played => played.id === card.id));
-  // Keep a winning play, but save the Ace when any lower card can open instead.
-  if (remainingHand.length === 0) return false;
-  return remainingHand.some(card => card.value < 14);
-}
-
-function shouldUseFourOfAKind(cardsToPlay: Card[], hand: Card[], state: GameState, playerId: number): boolean {
-  if (cardsToPlay.length !== 4) return true;
-  const value = cardsToPlay[0].value;
-  const remainingHand = hand.filter(card => !cardsToPlay.some(played => played.id === card.id));
-
-  // Save the quad if any lower card remains. Spending it is justified when
-  // this removes the lowest cards still in hand, including a winning play.
-  if (remainingHand.every(card => card.value >= value)) return true;
-
-  const currentIndex = state.players.findIndex(player => player.id === playerId);
-  const nextIndex = getNextPlayerIndex(currentIndex, state.players);
-  const nextPlayer = state.players[nextIndex];
-  if (!nextPlayer || nextPlayer.hasFinished || nextPlayer.hand.length > 2) return false;
-
-  // A higher pile top can strand a near-winning opponent with only low cards.
-  const tracker = buildOpponentCardTracker(state, playerId);
-  return probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, value) < 0.5;
-}
-
-export function getAIMoveCandidates(state: GameState, playerId: number, continuingTurn = state.canContinueTurn): AIMove[] {
-  const player = state.players.find(candidate => candidate.id === playerId);
-  if (!player || player.hasFinished) return [];
-
-  const isFirstMove = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
-  const possiblePlays = getPossiblePlays(player.hand, state.pile, state.options)
-    .filter(cards => (cards.length !== 4 || state.options.fourOfAKindRule) &&
-      validatePlay(cards, state.pile, isFirstMove, state.options).valid);
-  const candidates: AIMove[] = possiblePlays.map(cards => ({ type: 'play', cards }));
-
-  if (continuingTurn) {
-    candidates.push({ type: 'endTurn', cards: [] });
-  } else {
-    const takeOptions = getTakeOptions(state.pile, state.options);
-    if (takeOptions.canTake3) candidates.push({ type: 'take', cards: [], takeType: 'take3' });
-    if (takeOptions.canTakeAll) candidates.push({ type: 'take', cards: [], takeType: 'takeAll' });
-  }
-
-  const seen = new Set<string>();
-  return candidates.filter(candidate => {
-    const key = candidate.type === 'play'
-      ? `play:${candidate.cards.map(card => card.id).sort().join(',')}`
-      : `${candidate.type}:${candidate.takeType ?? ''}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// -----------------------------
-// Candidate generation (small set) for Hard AI
-// -----------------------------
-function generateCandidates(state: GameState, playerId: number) {
-  const player = state.players.find(p => p.id === playerId)!;
-  const hand = player.hand;
-  const pile = state.pile;
-  const options = state.options;
-  const topCard = pile[pile.length - 1];
-  const isFirstMove = pile.length === 1 && topCard.value === 9 && topCard.suit === 'diamonds';
-
-  const candidates: any[] = [];
-  const legalSingles = hand.filter(c => c.value >= topCard.value);
-  for (const card of legalSingles) candidates.push({ type: 'play', cards: [card] });
-
-  const byVal = new Map<number, Card[]>();
-  for (const c of hand) {
-    if (!byVal.has(c.value)) byVal.set(c.value, []);
-    byVal.get(c.value)!.push(c);
-  }
-  for (const [val, cards] of byVal) {
-    if (val < topCard.value) continue;
-    if (cards.length === 4 && options.fourOfAKindRule) candidates.push({ type: 'play', cards: cards.slice() });
-  }
-
-  if (isFirstMove) {
-    const nines = (byVal.get(9) || []);
-    if (options.specialNinesRule && nines.length >= 3) candidates.push({ type: 'play', cards: nines.slice(0, 3) });
-    if (nines.length >= 1) candidates.push({ type: 'play', cards: [nines[0]] });
-  }
-
-  // The player may choose a pickup when a legal play exists.
-  const takeOpts = getTakeOptions(pile, options);
-  if (takeOpts.canTake3) candidates.push({ type: 'take', takeType: 'take3', cards: [] });
-  if (takeOpts.canTakeAll) candidates.push({ type: 'take', takeType: 'takeAll', cards: [] });
-
-  // Deduplicate
-  const sigs = new Set<string>();
-  const uniq: any[] = [];
-  for (const c of candidates) {
-    const sig = c.type === 'take' ? `take-${c.takeType}` : `play-${c.cards.map((x: Card) => x.id).join(',')}`;
-    if (!sigs.has(sig)) { sigs.add(sig); uniq.push(c); }
-  }
-  return uniq.filter(candidate =>
-    candidate.type === 'take' || validatePlay(candidate.cards, pile, isFirstMove, options).valid
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-emerald-700 pt-3">
+          <p className="text-xs text-emerald-300">Saved on this device. Opponents’ hidden cards are excluded.</p>
+          <div className="flex gap-2">
+            <button onClick={onExport} className="text-xs font-medium text-amber-300 hover:text-amber-200">Export evaluations</button>
+            <button onClick={onSkip} className="text-xs font-medium text-emerald-300 hover:text-white">Skip</button>
+          </div>
+        </div>
+      </section>
+    </div>
   );
 }
 
-// -----------------------------
-// Candidate evaluation (Hard AI)
-// -----------------------------
-function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
-  const player = state.players.find(p => p.id === playerId)!;
-  const hand = player.hand;
-  const pile = state.pile;
-  const topValue = pile[pile.length - 1].value;
-  const tracker = buildOpponentCardTracker(state, playerId);
-  const opponentInfo = estimateOpponentStrength(state, playerId);
+export function GameBoard({
+  gameState,
+  onPlayCards,
+  onTakeCards,
+  onEndTurn,
+  onPauseGame,
+  onResumeGame,
+  onRestartGame,
+  onNewGame
+}: GameBoardProps) {
+  const [selectedCards, setSelectedCards] = useState<CardType[]>([]);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'play' | 'take3' | 'takeAll' | 'endTurn' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isAIThinking, setIsAIThinking] = useState(false);
+  const [showTakeOptions, setShowTakeOptions] = useState(false);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [showHistory, setShowHistory] = useState(true);
+  const [mutedState, setMutedState] = useState(false);
+  const [pendingAIFeedback, setPendingAIFeedback] = useState<PendingAIFeedback | null>(null);
+  const [feedbackMode, setFeedbackMode] = useState<'rating' | 'chooseMove'>('rating');
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [feedbackHidden, setFeedbackHidden] = useState(false);
+  const [showAICardsDuringFeedback, setShowAICardsDuringFeedback] = useState(false);
+  const [feedbackCount, setFeedbackCount] = useState(() => getAIFeedbackRecords().length);
+  const [humanMoveCount, setHumanMoveCount] = useState(() => getHumanMoveDemonstrations().length);
+  const historyContainerRef = useRef<HTMLDivElement>(null);
+  const prevPlayerIndexRef = useRef<number | null>(null);
+  const finishSoundPlayedRef = useRef(false);
 
-  const deltaHand = candidate.type === 'play' ? candidate.cards.length : 0;
-  let score = 0;
+  const onPlayCardsRef = useRef(onPlayCards);
+  const onTakeCardsRef = useRef(onTakeCards);
+  const onEndTurnRef = useRef(onEndTurn);
+  const gameStateRef = useRef(gameState);
 
-  if (candidate.type === 'take') {
-    const takeOptions = getTakeOptions(pile, state.options);
-    const takeCount = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
-    const cardsToTake = pile.slice(-takeCount);
-    // Taking adds cards, but can be useful when it improves hand structure or
-    // creates a four of a kind that can be shed on a later turn.
-    score -= takeCount * 18;
-    score += (evaluateHandComposition([...hand, ...cardsToTake]) - evaluateHandComposition(hand)) * 1.1;
-    const handCounts = new Map<number, number>();
-    for (const card of hand) handCounts.set(card.value, (handCounts.get(card.value) ?? 0) + 1);
-    for (const card of cardsToTake) {
-      if (card.value >= topValue && (handCounts.get(card.value) ?? 0) === 3) {
-        score += 120;
-        handCounts.set(card.value, 4);
-      } else if (card.value >= topValue) {
-        score += 4;
-      }
-    }
-    // Human evaluations repeatedly preferred taking cards over spending a
-    // King or Ace when those were the only cards that could answer the pile.
-    // Preserve those top answers when there is still a multi-card hand to play.
-    const legalAnswers = hand.filter(card => card.value >= topValue);
-    if (hand.length > 1 && legalAnswers.length > 0 && legalAnswers.every(card => card.value >= 13)) {
-      score += 55;
-      score += Math.min(15, Math.max(0, legalAnswers.length - 1) * 5);
-      if (candidate.takeType === 'takeAll' && takeCount >= 8) score += 20;
-    }
-    if (opponentInfo.opponentCloseToWin && cardsToTake.some(card => card.value >= topValue)) score += 12;
-    return score;
-  }
-
-  // Getting rid of cards matters, but keeping flexible high cards matters too.
-  score += 18 * deltaHand;
-
-  const myCards = hand.length;
-  const endgame = myCards <= 4 || opponentInfo.opponentCloseToWin;
-  if (endgame) score += 20;
-
-  if (candidate.type === 'play') {
-    if (candidate.cards.length === hand.length) score += SCORE_WEIGHTS.WINNING_MOVE_BONUS;
-    for (const c of candidate.cards) {
-      // A higher card is more flexible later, so its cost rises with rank.
-      const preservationCost = Math.pow(c.value - 9, 1.35) * 4;
-      score -= preservationCost + (c.value === 14 ? 12 : c.value === 13 ? 6 : 0);
-    }
-    // Prefer the lowest card that still makes the next player spend a higher
-    // card or pick up. This avoids wasting an Ace when a King does the job.
-    const playedValue = candidate.cards[0].value;
-    // Human demonstrations often spend one of a triple of tens on a nine,
-    // keeping the pair while making the next answer harder than a nine.
-    if (candidate.cards.length === 1 && topValue === 9 && playedValue === 10) {
-      const tensInHand = hand.filter(card => card.value === 10).length;
-      if (tensInHand >= 3) score += 20;
-      else if (tensInHand === 2) score += 10;
-    }
-    const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
-    const nextPlayer = state.players[nextIdx];
-    if (nextPlayer && !nextPlayer.hasFinished) {
-      const nextHandSize = nextPlayer.hand.length;
-      const forceProbability = 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue);
-      if (nextHandSize <= 1) score += 55 * forceProbability;
-      else if (nextHandSize <= 2) score += 35 * forceProbability;
-      else if (nextHandSize <= 3) score += 25 * forceProbability;
-      else score += 18 * forceProbability;
-      // Hard leans more strongly on tracked unseen cards when the next player
-      // is close to finishing; an unanswered high play can force a pickup.
-      if (nextHandSize <= 2) {
-        score += (nextHandSize === 1 ? 160 : 100) * forceProbability;
-      }
-      // Retaining multiple high cards gives options on later turns.
-      score += Math.min(3, hand.filter(c => c.value >= 12).length) * (playedValue >= 13 ? 4 : 0);
-    }
-  }
-
-  if (candidate.type === 'play' && candidate.cards.length === 4) {
-    // A quad is valuable only after the shared safety gate allows it: there
-    // are no lower cards left, or it can block a near-winning opponent.
-    score += 150;
-    if (candidate.cards[0].value === 14) score += 10;
-  }
-
-  const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
-  const nextPlayer = state.players[nextIdx];
-  const newTop = candidate.type === 'play' ? candidate.cards[candidate.cards.length - 1].value : pile[pile.length - 1].value;
-  const probNextCanPlay = nextPlayer
-    ? probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, newTop)
-    : 0;
-  const forceProb = 1 - probNextCanPlay;
-  // Reward plays that public-card tracking predicts will make the next player
-  // spend a higher card or pick up, including before their endgame.
-  score += 45 * forceProb;
-
-  if (opponentInfo.opponentCloseToWin) {
-    if (candidate.type === 'play' && candidate.cards.some((c: Card) => c.value >= 12)) score += 25;
-    if (candidate.type === 'take') score += 15;
-  }
-
-  const remainingAfter = candidate.type === 'play' ? hand.filter(h => !candidate.cards.find((c: Card) => c.id === h.id)) : hand;
-  const remCounts = new Map<number, number>();
-  for (const c of remainingAfter) remCounts.set(c.value, (remCounts.get(c.value) || 0) + 1);
-  for (const [v, cnt] of remCounts) {
-    if (cnt === 3 && v !== 14) score += 20;
-    if (cnt >= 2 && v >= 11) score += 6;
-  }
-
-  const trap = evaluateNineAceTrap(hand, pile, state, playerId);
-  if (trap.canPlay && candidate.type === 'play' && candidate.cards.length === 4 && candidate.cards.every((c: Card) => c.value === 9 || c.value === 14)) {
-    score += trap.score;
-  }
-
-  const enableProb = nextPlayer
-    ? probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, newTop + 1)
-    : 0;
-  score -= 8 * enableProb;
-
-  return score;
-}
-
-// -----------------------------
-// Fast simulator helpers for rollouts
-// -----------------------------
-function sampleHiddenHands(state: GameState, playerId: number): GameState {
-  const sampled = JSON.parse(JSON.stringify(state)) as GameState;
-  const tracker = buildOpponentCardTracker(state, playerId);
-  const unknownCounts = new Map(tracker.unknownCounts);
-  const unseenPlayers = sampled.players
-    .filter(player => player.id !== playerId && !player.hasFinished)
-    .sort(() => Math.random() - 0.5);
-
-  for (const opponent of unseenPlayers) {
-    const knownCards = tracker.knownHands.get(opponent.id) ?? [];
-    const slotsToSample = Math.max(0, opponent.hand.length - knownCards.length);
-    const sampledCards: Card[] = [];
-    const ceiling = tracker.unknownValueCeilings.get(opponent.id);
-    for (let slot = 0; slot < slotsToSample; slot++) {
-      let possibleValues = [...unknownCounts.entries()]
-        .filter(([value, count]) => count > 0 && (ceiling === undefined || value < ceiling));
-      if (possibleValues.length === 0) {
-        possibleValues = [...unknownCounts.entries()].filter(([, count]) => count > 0);
-      }
-      const total = possibleValues.reduce((sum, [, count]) => sum + count, 0);
-      if (total <= 0) break;
-      let pick = Math.floor(Math.random() * total);
-      let value = possibleValues[0][0];
-      for (const [candidateValue, count] of possibleValues) {
-        if (pick < count) { value = candidateValue; break; }
-        pick -= count;
-      }
-      unknownCounts.set(value, (unknownCounts.get(value) ?? 0) - 1);
-      sampledCards.push({
-        id: `rollout-${opponent.id}-${slot}-${Math.random().toString(36).slice(2, 8)}`,
-        value: value as Card['value'],
-        suit: 'spades',
-        faceUp: false,
-      });
-    }
-    opponent.hand = sortHand([...knownCards.map(card => ({ ...card })), ...sampledCards]);
-  }
-  return sampled;
-}
-
-function chooseRolloutMove(state: GameState, playerId: number): AIMove {
-  const player = state.players[playerId];
-  if (!player || player.hasFinished || player.hand.length === 0) return { type: 'endTurn', cards: [] };
-  const isFirstMove = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
-  const plays = getPossiblePlays(player.hand, state.pile, state.options)
-    .filter(cards => validatePlay(cards, state.pile, isFirstMove, state.options).valid);
-
-  if (state.canContinueTurn && plays.length === 0) return { type: 'endTurn', cards: [] };
-  if (plays.length === 0) {
-    const takeOptions = getTakeOptions(state.pile, state.options);
-    if (takeOptions.canTake3) return { type: 'take', cards: [], takeType: 'take3' };
-    if (takeOptions.canTakeAll) return { type: 'take', cards: [], takeType: 'takeAll' };
-    const lowest = [...player.hand].sort((a, b) => a.value - b.value)[0];
-    return lowest ? { type: 'play', cards: [lowest] } : { type: 'endTurn', cards: [] };
-  }
-
-  const quad = plays.find(cards => cards.length === 4 && shouldUseFourOfAKind(cards, player.hand, state, playerId));
-  if (quad) return { type: 'play', cards: quad };
-  const specialNines = plays.find(cards => cards.length === 3 && cards.every(card => card.value === 9));
-  if (isFirstMove && specialNines) return { type: 'play', cards: specialNines };
-  const single = plays.filter(cards => cards.length === 1).sort((a, b) => a[0].value - b[0].value)[0];
-  return single ? { type: 'play', cards: single } : { type: 'endTurn', cards: [] };
-}
-
-function simulateFastPlayout(sim: GameState, aiPlayerId: number, maxSteps = 80): number | null {
-  let steps = 0;
-  const visited = new Set<string>();
-  while (sim.phase === 'playing' && steps < maxSteps) {
-    const position = `${sim.currentPlayerIndex}|${sim.canContinueTurn ? 1 : 0}|${sim.pile.map(card => card.id).join(',')}|${sim.players.map(player => player.hand.map(card => card.id).sort().join(',')).join('|')}`;
-    if (visited.has(position)) break;
-    visited.add(position);
-
-    const player = sim.players[sim.currentPlayerIndex];
-    if (!player || player.hasFinished || player.hand.length === 0) {
-      sim = endTurn(sim);
-      steps++;
-      continue;
-    }
-    const move = chooseRolloutMove(sim, player.id);
-    if (move.type === 'play' && move.cards.length > 0) {
-      const isFirstMove = sim.pile.length === 1 && sim.pile[0].value === 9 && sim.pile[0].suit === 'diamonds';
-      const validation = validatePlay(move.cards, sim.pile, isFirstMove, sim.options);
-      sim = validation.valid ? playCards(sim, player.id, move.cards, Boolean(validation.continueTurn)) : endTurn(sim);
-    } else if (move.type === 'take') {
-      const takeOptions = getTakeOptions(sim.pile, sim.options);
-      const count = move.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
-      sim = count > 0 ? takeCards(sim, player.id, count) : endTurn(sim);
-    } else {
-      sim = endTurn(sim);
-    }
-    steps++;
-  }
-  if (sim.phase === 'finished') return sim.finishOrder[0]?.id ?? null;
-
-  const player = sim.players[aiPlayerId];
-  const opponents = sim.players.filter(candidate => candidate.id !== aiPlayerId && !candidate.hasFinished);
-  if (!player || opponents.length === 0) return aiPlayerId;
-  const bestOpponentHand = Math.min(...opponents.map(opponent => opponent.hand.length));
-  if (player.hand.length < bestOpponentHand) return aiPlayerId;
-  if (player.hand.length > bestOpponentHand) return opponents.find(opponent => opponent.hand.length === bestOpponentHand)?.id ?? null;
-  return null;
-}
-
-function monteCarloEstimate(state: GameState, playerId: number, candidate: any, playouts = 8): number {
-  let result = 0;
-  for (let i = 0; i < playouts; i++) {
-    let sim = sampleHiddenHands(state, playerId);
-    if (candidate.type === 'play') {
-      const isFirstMove = sim.pile.length === 1 && sim.pile[0].value === 9 && sim.pile[0].suit === 'diamonds';
-      const validation = validatePlay(candidate.cards, sim.pile, isFirstMove, sim.options);
-      if (!validation.valid) continue;
-      sim = playCards(sim, playerId, candidate.cards, Boolean(validation.continueTurn));
-    } else if (candidate.type === 'take') {
-      const takeOptions = getTakeOptions(sim.pile, sim.options);
-      const count = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
-      if (count <= 0) continue;
-      sim = takeCards(sim, playerId, count);
-    } else {
-      continue;
-    }
-    const winner = simulateFastPlayout(sim, playerId);
-    if (winner === playerId) result += 1;
-    else if (winner === null) result += 0.5;
-  }
-  return result / playouts;
-}
-
-// -----------------------------
-// Hard AI
-// -----------------------------
-function isHighImpactCandidate(candidate: any, handSize: number) {
-  if (candidate.type === 'play' && candidate.cards.length === 4) return true;
-  if (candidate.type === 'play' && candidate.cards.length === handSize) return true;
-  return false;
-}
-
-function getHardAIMove(state: GameState, playerId: number): AIMove {
-  const player = state.players.find(p => p.id === playerId)!;
-  const hand = player.hand;
-  const pile = state.pile;
-  const options = state.options;
-
-  const candidates = generateCandidates(state, playerId);
-  if (!candidates || candidates.length === 0) {
-    const takeOpts = getTakeOptions(pile, options);
-    if (takeOpts.canTake3) return returnTakeMove('take3');
-    if (takeOpts.canTakeAll) return returnTakeMove('takeAll');
-    // No candidates and no take options -> force a play (pile may be only 9♦)
-    const fallback = enforceNoSkipDecision([], null, pile, options, hand);
-    if (fallback.type === 'take') return returnTakeMove(fallback.takeType === 'takeAll' ? 'takeAll' : 'take3');
-    return fallback;
-  }
-
-  const preferredCandidates = candidates.filter(candidate =>
-    candidate.type !== 'play' || (
-      !isUnnecessaryAceOnOpening(candidate.cards, hand, pile) &&
-      shouldUseFourOfAKind(candidate.cards, hand, state, playerId)
-    )
-  );
-  const candidatesToScore = preferredCandidates.length > 0 ? preferredCandidates : candidates;
-  const scored = candidatesToScore.map(c => {
-    let strategicScore: number;
-    if (c.type === 'play') {
-      strategicScore = evaluatePlayMove(c.cards, hand, pile, state, playerId);
-      const validation = validatePlay(c.cards, pile, pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds', options);
-      if (validation.valid && validation.continueTurn && c.cards.length === 4) {
-        const remainingHand = hand.filter(card => !c.cards.some(played => played.id === card.id));
-        const nextPile = [...pile, ...c.cards];
-        const nextPlays = getPossiblePlays(remainingHand, nextPile, options)
-          .filter(play => validatePlay(play, nextPile, false, options).valid);
-        if (nextPlays.length > 0) {
-          const bestFollowUp = Math.max(...nextPlays.map(play => evaluatePlayMove(play, remainingHand, nextPile, state, playerId)));
-          if (bestFollowUp > 0) strategicScore += bestFollowUp * 0.25;
-        }
-      }
-    } else {
-      const takeOptions = getTakeOptions(pile, options);
-      const takeCount = c.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
-      strategicScore = evaluateTakeMove(takeCount, hand, pile, state, playerId);
-    }
-
-    // Blend heuristic scoring with imperfect-information rollouts. Each rollout
-    // samples opponent hands from public card counts rather than reading them.
-    const rolloutAdjustment = (monteCarloEstimate(state, playerId, c, 4) - 0.5) * 90;
-    return { c, score: strategicScore + evaluateCandidate(state, playerId, c) + rolloutAdjustment };
+  useEffect(() => {
+    onPlayCardsRef.current = onPlayCards;
+    onTakeCardsRef.current = onTakeCards;
+    onEndTurnRef.current = onEndTurn;
+    gameStateRef.current = gameState;
   });
-  scored.sort((a, b) => b.score - a.score);
 
-  const bestMove = scored[0].c;
+  // Init audio context on mount
+  useEffect(() => { initAudio(); }, []);
 
-  // Keep the decision based on public information. The previous rollout used
-  // the real opponent hands, which gave the AI information a human player
-  // cannot have and made its estimates unreliable for actual play.
+  // Your turn sound
+  useEffect(() => {
+    if (gameState.phase !== 'playing') return;
+    const cur = gameState.players[gameState.currentPlayerIndex];
+    if (!cur) return;
+    if (prevPlayerIndexRef.current === null) {
+      prevPlayerIndexRef.current = gameState.currentPlayerIndex;
+      return;
+    }
+    if (prevPlayerIndexRef.current !== gameState.currentPlayerIndex) {
+      prevPlayerIndexRef.current = gameState.currentPlayerIndex;
+      if (!cur.isAI && !cur.hasFinished) {
+        playYourTurnSound();
+      }
+    }
+  }, [gameState.currentPlayerIndex, gameState.phase]);
 
-// 
-const possiblePlays = getPossiblePlays(player.hand, pile, options);
-const safeDecision = enforceNoSkipDecision(possiblePlays, bestMove, pile, options, player.hand);
+  // Combo (4-of-a-kind bonus turn) sound
+  useEffect(() => {
+    if (gameState.canContinueTurn) {
+      playComboSound();
+    }
+  }, [gameState.canContinueTurn]);
 
-if (safeDecision.type === 'take') return returnTakeMove(safeDecision.takeType === 'takeAll' ? 'takeAll' : 'take3');
-return safeDecision;
+  // Win / lose sound on game end
+  useEffect(() => {
+    if (gameState.phase === 'finished' && !finishSoundPlayedRef.current) {
+      finishSoundPlayedRef.current = true;
+      const human = gameState.players.find((p: any) => !p.isAI);
+      if (!human) return;
+      const totalPlayers = gameState.players.length;
+      if (human.finishPosition === 1) {
+        playWinSound();
+      } else if (human.finishPosition === totalPlayers) {
+        playLoseSound();
+      } else {
+        playWinSound();
+      }
+    }
+    if (gameState.phase === 'playing') {
+      finishSoundPlayedRef.current = false;
+    }
+  }, [gameState.phase]);
 
-}
+  useEffect(() => {
+    if (showHistory && historyContainerRef.current) {
+      historyContainerRef.current.scrollTop = 0;
+    }
+  }, [gameState.moveHistory, showHistory]);
 
-// -----------------------------
-// Medium AI (previous hard logic moved here)
-// -----------------------------
-function getMediumAIMove(state: GameState, playerId: number): AIMove {
-  const player = state.players.find(p => p.id === playerId)!;
-  const hand = player.hand;
-  const pile = state.pile;
-  const options = state.options;
-  const topCard = pile[pile.length - 1];
+  useEffect(() => {
+    if (gameState.phase === 'playing') {
+      const interval = setInterval(() => {
+        if (gameStateRef.current.gameStartTime) {
+          const elapsed = (Date.now() - gameStateRef.current.gameStartTime) / 1000 - gameStateRef.current.totalPausedTime;
+          setElapsedTime(elapsed);
+        }
+      }, 100);
+      return () => clearInterval(interval);
+    }
+  }, [gameState.phase]);
+
+  useEffect(() => {
+    if (gameState.phase === 'paused' && gameState.gameStartTime) {
+      const elapsed = (gameState.pausedTime! - gameState.gameStartTime) / 1000 - gameState.totalPausedTime;
+      setElapsedTime(elapsed);
+    }
+  }, [gameState.phase, gameState.gameStartTime, gameState.pausedTime, gameState.totalPausedTime]);
+
+  useEffect(() => {
+    const shouldReset = !gameState.canContinueTurn;
+    if (shouldReset) {
+      setSelectedCards([]);
+      setShowConfirm(false);
+      setPendingAction(null);
+      setError(null);
+      setShowTakeOptions(false);
+    }
+  }, [gameState.currentPlayerIndex]);
+
+  useEffect(() => {
+    if (gameState.canContinueTurn) {
+      setSelectedCards([]);
+      setError(null);
+    }
+  }, [gameState.canContinueTurn]);
+
+  const currentPlayer = gameState.players[gameState.currentPlayerIndex];
+  const humanPlayers = gameState.players.filter((p: any) => !p.isAI);
+  const allHumanPlayersFinished = humanPlayers.length > 0 && humanPlayers.every((p: any) => p.hasFinished);
+
+  const isHumanTurn = currentPlayer && !currentPlayer.isAI && !currentPlayer.hasFinished && gameState.phase === 'playing';
+  const isPlayerTurn = currentPlayer && !currentPlayer.hasFinished;
+  const handCardsFaceUp = currentPlayer && (!currentPlayer.isAI || allHumanPlayersFinished);
+  const pile = gameState.pile;
+  const options: GameOptions = gameState.options;
+
   const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
+  const takeOptions = getTakeOptions(pile, options);
+  const validMoves = isPlayerTurn ? getValidMoves(currentPlayer.hand, pile) : { canPlay: false, canTake: false };
 
-  const opponentInfo = estimateOpponentStrength(state, playerId);
+  const isFourNinesStart = gameState.canContinueTurn &&
+    isFirstMove &&
+    currentPlayer.hand.filter((c: CardType) => c.value === 9).length === 3;
 
-  const possiblePlays = getPossiblePlays(hand, pile, options);
-  const takeOpts = getTakeOptions(pile, options);
+  useEffect(() => {
+    if (gameState.phase !== 'playing') {
+      return;
+    }
+    if (pendingAIFeedback) return;
 
-  let bestMove: any = null;
-  let bestScore = -Infinity;
+    const currentPlayer = gameState.players[gameState.currentPlayerIndex];
 
-  for (const playCards of possiblePlays) {
-    if (isUnnecessaryAceOnOpening(playCards, hand, pile)) continue;
-    if (!shouldUseFourOfAKind(playCards, hand, state, playerId)) continue;
-    const validation = validatePlay(playCards, pile, isFirstMove, options);
-    if (validation.valid) {
-      const score = evaluatePlayMove(playCards, hand, pile, state, playerId);
-      if (validation.continueTurn && playCards.length === 4) {
-        const remainingHand = hand.filter(c => !playCards.find(pc => pc.id === c.id));
-        if (remainingHand.length > 0) {
-          const nextPlays = getPossiblePlays(remainingHand, [...pile, ...playCards], options);
-          if (nextPlays.length > 0) {
-            const nextScore = evaluatePlayMove(nextPlays[0], remainingHand, pile, state, playerId);
-            if (nextScore > 0) {
-              const combinedScore = score + nextScore * 0.25;
-              if (combinedScore > bestScore) {
-                bestScore = combinedScore;
-                bestMove = { type: 'play', cards: playCards };
-              }
-              continue;
-            }
+    if (!currentPlayer || !currentPlayer.isAI || currentPlayer.id === 'human') {
+      return;
+    }
+
+    if (currentPlayer.hasFinished) {
+      const timeout = setTimeout(() => {
+        const state = gameStateRef.current;
+        if (state.phase !== 'playing') return;
+
+        const activePlayers = state.players.filter((p: any) => !p.hasFinished);
+        if (activePlayers.length <= 1) {
+          return;
+        }
+
+        onPlayCardsRef.current(currentPlayer.id, [], false);
+      }, 300);
+      return () => clearTimeout(timeout);
+    }
+
+    setIsAIThinking(true);
+
+    const executeAITurn = () => {
+      const state = gameStateRef.current;
+      if (state.phase !== 'playing') {
+        setIsAIThinking(false);
+        return;
+      }
+
+      const player = state.players[state.currentPlayerIndex];
+
+      if (!player || !player.isAI || player.hasFinished) {
+        setIsAIThinking(false);
+        return;
+      }
+
+      const aiMove = state.canContinueTurn
+        ? getContinueTurnMove(player.hand, state.pile, state.options.aiDifficulty, state.options, state, player.id)
+        : getAIMove(state, player.id);
+      let executedMove: AIFeedbackMove = { type: 'endTurn', cards: [] };
+
+      if (aiMove.type === 'endTurn') {
+        executedMove = { type: 'endTurn', cards: [] };
+        onEndTurnRef.current();
+      } else if (aiMove.type === 'play' && aiMove.cards.length > 0) {
+        const pile = state.pile;
+        const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
+        const validation = validatePlay(aiMove.cards, pile, isFirstMove, state.options);
+
+        if (validation.valid) {
+          executedMove = { type: 'play', cards: aiMove.cards.map((card: CardType) => ({ ...card })) };
+          onPlayCardsRef.current(player.id, aiMove.cards, validation.continueTurn || false);
+        } else {
+          const takeOpts = getTakeOptions(pile, state.options);
+          const count = takeOpts.canTake3 ? takeOpts.take3Count : takeOpts.takeAllCount;
+          if (count > 0) {
+            executedMove = { type: 'take', cards: [], takeType: takeOpts.canTake3 ? 'take3' : 'takeAll' };
+            onTakeCardsRef.current(player.id, count);
+          } else {
+            executedMove = { type: 'endTurn', cards: [] };
+            onPlayCardsRef.current(player.id, [], false);
           }
         }
+      } else if (aiMove.type === 'take') {
+        const takeOpts = getTakeOptions(state.pile, state.options);
+        const count = aiMove.takeType === 'takeAll'
+          ? takeOpts.takeAllCount
+          : takeOpts.take3Count;
+
+        if (count > 0) {
+          executedMove = { type: 'take', cards: [], takeType: aiMove.takeType };
+          onTakeCardsRef.current(player.id, count);
+        } else {
+          executedMove = { type: 'endTurn', cards: [] };
+          onPlayCardsRef.current(player.id, [], false);
+        }
+      } else {
+        executedMove = { type: 'endTurn', cards: [] };
+        onPlayCardsRef.current(player.id, [], false);
       }
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = { type: 'play', cards: playCards };
+
+      const feedbackCandidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
+      const hadMoveChoice = feedbackCandidates.some(candidate => candidate.type === 'play');
+      if (hadMoveChoice) {
+        setFeedbackMode('rating');
+        setFeedbackError(null);
+        setFeedbackHidden(false);
+        setShowAICardsDuringFeedback(false);
+        setPendingAIFeedback({
+          stateBeforeMove: state,
+          playerId: player.id,
+          chosenMove: executedMove,
+          candidates: feedbackCandidates,
+        });
       }
+      setIsAIThinking(false);
+    };
+
+    const delay = getAIDelay(gameState.options.aiDifficulty);
+    const timeout = setTimeout(executeAITurn, delay);
+
+    return () => {
+      clearTimeout(timeout);
+      setIsAIThinking(false);
+    };
+  }, [gameState.currentPlayerIndex, gameState.phase, gameState.players, gameState.canContinueTurn, pendingAIFeedback]);
+
+  const handleCardSelect = (card: CardType) => {
+    if (!isHumanTurn) return;
+
+    const isSelected = selectedCards.find(c => c.id === card.id);
+    if (isSelected) {
+      setSelectedCards(selectedCards.filter(c => c.id !== card.id));
+    } else {
+      setSelectedCards([...selectedCards, card]);
     }
-  }
+    setError(null);
+  };
 
-  // Picking up is a strategic choice even when a legal play exists. Compare
-  // both available pickup sizes against the best legal play.
-  if (takeOpts.canTake3) {
-    const take3Score = evaluateTakeMove(takeOpts.take3Count, hand, pile, state, playerId);
-    if (take3Score > bestScore) {
-      bestScore = take3Score;
-      bestMove = { type: 'take', cards: [], takeType: 'take3' };
+  const handlePlayClick = () => {
+    if (selectedCards.length === 0) {
+      setError('Select cards to play');
+      return;
     }
-  }
-  if (takeOpts.canTakeAll) {
-    const takeAllScore = evaluateTakeMove(takeOpts.takeAllCount, hand, pile, state, playerId);
-    if (takeAllScore > bestScore) {
-      bestScore = takeAllScore;
-      bestMove = { type: 'take', cards: [], takeType: 'takeAll' };
+
+    const validation = validatePlay(selectedCards, pile, isFirstMove, options);
+    if (!validation.valid) {
+      setError(validation.error || 'Invalid move');
+      return;
     }
-  }
 
-  if (!bestMove) {
-    if (takeOpts.canTake3) bestMove = { type: 'take', cards: [], takeType: 'take3' };
-    bestMove = hand.length > 0 ? { type: 'play', cards: [hand[0]] } : { type: 'endTurn', cards: [] };
-  }
+    setPendingAction('play');
+    setShowConfirm(true);
+  };
 
-  const safeDecision = enforceNoSkipDecision(possiblePlays, bestMove, pile, options, hand);
-  if (safeDecision.type === 'take') return returnTakeMove(safeDecision.takeType === 'takeAll' ? 'takeAll' : 'take3');
-  return safeDecision;
-}
-
-function evaluateTakeMove(takeCount: number, hand: Card[], pile: Card[], state: GameState, playerId: number) {
-  let score = SCORE_WEIGHTS.TAKING_CARDS_BASE_PENALTY - takeCount * 12;
-  const cardsToTake = pile.slice(-takeCount);
-  const opponentInfo = estimateOpponentStrength(state, playerId);
-  const quadCheck = wouldCompleteQuad(hand, cardsToTake);
-  if (quadCheck.wouldComplete) score += SCORE_WEIGHTS.TAKING_COMPLETES_QUAD_BONUS;
-  if (wouldFixTriple(hand, cardsToTake)) score += SCORE_WEIGHTS.TAKING_USEFUL_CARDS_BONUS;
-  if (wouldGetHighCards(cardsToTake)) score += SCORE_WEIGHTS.TAKING_HIGH_CARDS_BONUS;
-  const myCardCount = hand.length;
-  if (myCardCount < opponentInfo.avgOpponentCards - 2) score += SCORE_WEIGHTS.TAKING_WHEN_LEADING_PENALTY;
-  if (opponentInfo.opponentCloseToWin) {
-    if (quadCheck.wouldComplete) score += 30;
-  }
-  const currentHandScore = evaluateHandComposition(hand);
-  const newHandScore = evaluateHandComposition([...hand, ...cardsToTake]);
-  const handChange = newHandScore - currentHandScore;
-  score += handChange * 0.75;
-  return score;
-}
-
-// -----------------------------
-// Main AI entrypoint
-// -----------------------------
-export function getAIMove(state: GameState, playerId: number): AIMove {
-  const player = state.players.find(p => p.id === playerId);
-  if (!player) return { type: 'endTurn', cards: [] };
-
-  const options = state.options;
-  const difficulty = options.aiDifficulty;
-
-  const isSpecialNineOpening = state.pile.length === 1 &&
-    state.pile[0].value === 9 &&
-    state.pile[0].suit === 'diamonds';
-  if (options.specialNinesRule && isSpecialNineOpening) {
-    const remainingNines = player.hand.filter(card => card.value === 9);
-    if (remainingNines.length === 3) {
-      return { type: 'play', cards: remainingNines };
+  const handleTakeClick = () => {
+    if (takeOptions.canTake3 && takeOptions.canTakeAll) {
+      setShowTakeOptions(true);
+    } else if (takeOptions.canTakeAll) {
+      setPendingAction('takeAll');
+      setShowConfirm(true);
+    } else {
+      setPendingAction('take3');
+      setShowConfirm(true);
     }
-  }
+  };
 
-  if (difficulty === 'easy') return getEasyAIMove(player.hand, state.pile, options);
-  if (difficulty === 'medium') return getMediumAIMove(state, playerId);
+  const handleTake3 = () => {
+    setPendingAction('take3');
+    setShowConfirm(true);
+    setShowTakeOptions(false);
+  };
 
-  const move = getHardAIMove(state, playerId);
+  const handleTakeAll = () => {
+    setPendingAction('takeAll');
+    setShowConfirm(true);
+    setShowTakeOptions(false);
+  };
 
-  // Check for the specific scenario with only 9♦ on pile
-  if (
-    move.type === 'endTurn' &&
-    state.pile.length === 1
-  ) {
-    // Always play lowest card instead of ending turn
-    const sortedHand = [...player.hand].sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [sortedHand[0]] };
-  }
+  const handleEndTurnClick = () => {
+    setPendingAction('endTurn');
+    setShowConfirm(true);
+  };
 
-  // Otherwise, follow the normal move
-  if (move.type === 'endTurn') {
-    // Already handled above, but just a fallback
-    const possiblePlays = getPossiblePlays(player.hand, state.pile, options);
-    const fallback = enforceNoSkipDecision(
-      possiblePlays,
-      null,
-      state.pile,
-      options,
-      player.hand
+  const handleConfirm = () => {
+    let humanMove: AIFeedbackMove | null = null;
+    if (pendingAction === 'play') {
+      const validation = validatePlay(selectedCards, pile, isFirstMove, options);
+      humanMove = { type: 'play', cards: selectedCards.map(card => ({ ...card })) };
+      if (validation.continueTurn) {
+        playComboSound();
+      } else {
+        playCardSound();
+      }
+      onPlayCards(currentPlayer.id, selectedCards, validation.continueTurn || false);
+    } else if (pendingAction === 'take3') {
+      humanMove = { type: 'take', cards: [], takeType: 'take3' };
+      playTakeSound();
+      onTakeCards(currentPlayer.id, takeOptions.take3Count);
+    } else if (pendingAction === 'takeAll') {
+      humanMove = { type: 'take', cards: [], takeType: 'takeAll' };
+      playTakeSound();
+      onTakeCards(currentPlayer.id, takeOptions.takeAllCount);
+    } else if (pendingAction === 'endTurn') {
+      humanMove = { type: 'endTurn', cards: [] };
+      playClickSound();
+      onEndTurn();
+    }
+
+    if (humanMove && currentPlayer && !currentPlayer.isAI) {
+      const preMoveState = gameState as import('../types/game').GameState;
+      const availableMoves = getAIMoveCandidates(preMoveState, currentPlayer.id, gameState.canContinueTurn);
+      const record = createHumanMoveDemonstration(preMoveState, currentPlayer.id, humanMove, availableMoves);
+      if (saveHumanMoveDemonstration(record)) setHumanMoveCount(getHumanMoveDemonstrations().length);
+    }
+
+    setShowConfirm(false);
+    setPendingAction(null);
+    setSelectedCards([]);
+  };
+
+  const finishAIFeedback = (rating: 'good' | 'bad', preferredMove?: AIFeedbackMove) => {
+    if (!pendingAIFeedback) return;
+    const record = createAIFeedbackRecord(
+      pendingAIFeedback.stateBeforeMove,
+      pendingAIFeedback.playerId,
+      pendingAIFeedback.chosenMove,
+      rating,
+      preferredMove,
+      pendingAIFeedback.candidates,
     );
-    if (fallback.type === 'take') return returnTakeMove(fallback.takeType === 'takeAll' ? 'takeAll' : 'take3');
-    return fallback;
-  } else {
-    return move;
-  }
-}
-
-// -----------------------------
-// Easy AI
-// -----------------------------
-function getEasyAIMove(hand: Card[], pile: Card[], options: GameOptions): AIMove {
-  const topCard = pile[pile.length - 1];
-  const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
-  if (isFirstMove) {
-    const nines = hand.filter(c => c.value === 9);
-    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
-    if (nines.length >= 1) return { type: 'play', cards: [nines[0]] };
-  }
-  const takeOpts = getTakeOptions(pile, options);
-  if (takeOpts.canTake3 && Math.random() < 0.2) {
-    return { type: 'take', cards: [], takeType: 'take3' };
-  }
-  const validCards = hand.filter(c => c.value >= topCard.value);
-  if (validCards.length > 0) {
-    // Easy chooses a legal card without weighing card value, groups, or future
-    // turns. This keeps it unpredictable while leaving strategic play to higher levels.
-    const card = validCards[Math.floor(Math.random() * validCards.length)];
-    return { type: 'play', cards: [card] };
-  }
-  // If pile is only 9♦ and hand exists, force a play (cannot take)
-  if (pile.length === 1 && hand.length > 0) {
-    // The opening special move is the three remaining nines, never a mixed set.
-    const nines = hand.filter(c => c.value === 9);
-    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
-    const fourVal = hasFourOfSameValue(hand);
-    if (fourVal !== null) return { type: 'play', cards: getCardsOfSameValue(hand, fourVal) };
-    const sorted = [...hand].sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [sorted[0]] };
-  }
-
-  return { type: 'take', cards: [], takeType: takeOpts.canTake3 ? 'take3' : 'takeAll' };
-
-}
-
-// -----------------------------
-// Continue-turn logic (only PLAY or END TURN)
-// -----------------------------
-export function getContinueTurnMove(
-  hand: Card[],
-  pile: Card[],
-  difficulty: AIDifficulty,
-  options: GameOptions,
-  state: GameState,
-  playerId: number
-): { type: 'play' | 'endTurn'; cards: Card[] } {
-  const topCard = pile[pile.length - 1];
-  const isFirstMove = pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds';
-  const possiblePlays = getPossiblePlays(hand, pile, options);
-
-  // If no possible plays but pile is only 9♦, force a play from hand
-  if ((!possiblePlays || possiblePlays.length === 0) && pile.length === 1 && hand.length > 0) {
-    const nines = hand.filter(c => c.value === 9);
-    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
-    const fourVal = hasFourOfSameValue(hand);
-    if (fourVal !== null) return { type: 'play', cards: getCardsOfSameValue(hand, fourVal) };
-    const sorted = [...hand].sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [sorted[0]] };
-  }
-
-  if (!possiblePlays || possiblePlays.length === 0) return { type: 'endTurn', cards: [] };
-
-  let best: Card[] | null = null;
-  let bestScore = -Infinity;
-  for (const play of possiblePlays) {
-    if (isUnnecessaryAceOnOpening(play, hand, pile)) continue;
-    if (difficulty !== 'easy' && !shouldUseFourOfAKind(play, hand, state, playerId)) continue;
-    const validation = validatePlay(play, pile, isFirstMove, options);
-    if (!validation.valid) continue;
-    const score = evaluatePlayMove(play, hand, pile, state, playerId);
-    if (score > bestScore) {
-      bestScore = score;
-      best = play;
+    if (!saveAIFeedback(record)) {
+      setFeedbackError('Could not save feedback on this device. Check browser storage and try again.');
+      return;
     }
+    setFeedbackCount(getAIFeedbackRecords().length);
+    setFeedbackError(null);
+    setFeedbackMode('rating');
+    setPendingAIFeedback(null);
+    setFeedbackHidden(false);
+    setShowAICardsDuringFeedback(false);
+  };
+
+  const skipAIFeedback = () => {
+    setFeedbackError(null);
+    setFeedbackMode('rating');
+    setPendingAIFeedback(null);
+    setFeedbackHidden(false);
+    setShowAICardsDuringFeedback(false);
+  };
+
+  const downloadAIFeedback = () => {
+    const blob = new Blob([exportAIFeedback()], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'bobby-ai-evaluations.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadHumanMoveData = () => {
+    const blob = new Blob([exportHumanMoveDemonstrations()], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'bobby-human-demonstrations.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCancel = () => {
+    setShowConfirm(false);
+    setPendingAction(null);
+    setShowTakeOptions(false);
+  };
+
+  const getConfirmMessage = () => {
+    if (pendingAction === 'play') {
+      const cardNames = selectedCards.map(c =>
+        `${c.value === 11 ? 'J' : c.value === 12 ? 'Q' : c.value === 13 ? 'K' : c.value === 14 ? 'A' : c.value} of ${c.suit}`
+      ).join(', ');
+      return `Play ${cardNames}?`;
+    } else if (pendingAction === 'take3') {
+      return `Take ${takeOptions.take3Count} card${takeOptions.take3Count !== 1 ? 's' : ''} from pile?`;
+    } else if (pendingAction === 'takeAll') {
+      return `Take all ${takeOptions.takeAllCount} cards from pile?`;
+    } else if (pendingAction === 'endTurn') {
+      return 'End your turn?';
+    }
+    return '';
+  };
+
+  const feedbackDialog = pendingAIFeedback && feedbackHidden ? (
+    <button
+      onClick={() => setFeedbackHidden(false)}
+      className="fixed right-4 top-4 z-50 flex items-center gap-2 rounded-full border border-amber-400 bg-emerald-900 px-4 py-3 font-semibold text-amber-300 shadow-xl transition-colors hover:bg-emerald-800"
+    >
+      <Eye className="h-4 w-4" />
+      Show AI evaluation
+    </button>
+  ) : pendingAIFeedback ? (
+    <AIFeedbackDialog
+      pending={pendingAIFeedback}
+      mode={feedbackMode}
+      feedbackCount={feedbackCount}
+      error={feedbackError}
+      onGood={() => finishAIFeedback('good')}
+      onStartBad={() => { setFeedbackError(null); setFeedbackMode('chooseMove'); }}
+      onChoose={move => finishAIFeedback('bad', move)}
+      onBadWithoutAlternative={() => finishAIFeedback('bad')}
+      onBack={() => setFeedbackMode('rating')}
+      onSkip={skipAIFeedback}
+      onExport={downloadAIFeedback}
+      showAICards={showAICardsDuringFeedback}
+      onToggleAICards={() => setShowAICardsDuringFeedback(value => !value)}
+      onHide={() => setFeedbackHidden(true)}
+    />
+  ) : null;
+
+  if (gameState.phase === 'finished') {
+    return (
+      <div className="min-h-screen bg-emerald-900 flex items-center justify-center p-4">
+        <div className="bg-emerald-800 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
+          <h2 className="text-2xl sm:text-3xl font-bold text-amber-300 mb-2">Game Over!</h2>
+
+          <div className="flex items-center justify-center gap-2 mb-4 sm:mb-6">
+            <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-300" />
+            <span className="text-emerald-200 text-base sm:text-lg">Total Time: {formatTime(elapsedTime)}</span>
+          </div>
+
+          <div className="space-y-2 sm:space-y-3 mb-6 sm:mb-8">
+            <h3 className="text-sm sm:text-base text-emerald-200 font-semibold">Final Rankings:</h3>
+            {gameState.finishOrder.map((player: any, index: number) => (
+              <div
+                key={player.id}
+                className={`flex items-center justify-between p-2 sm:p-3 rounded-lg text-sm ${
+                  index === 0 ? 'bg-amber-500 text-emerald-900' :
+                  index === gameState.finishOrder.length - 1 ? 'bg-red-500 text-white' :
+                  'bg-emerald-600 text-white'
+                }`}
+              >
+                <div className="flex items-center gap-2 sm:gap-3">
+                  <span className="font-medium">
+                    {index + 1}. {player.name}
+                  </span>
+                  {index === gameState.finishOrder.length - 1 && (
+                    <span className="text-xs font-bold flex items-center gap-1"><Skull className="w-3 h-3" /> LOSER</span>
+                  )}
+                  {index === 0 && (
+                    <span className="text-xs font-bold flex items-center gap-1"><Crown className="w-3 h-3" /> WINNER</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 text-xs sm:text-sm">
+                  <Clock className="w-3 h-3 sm:w-4 sm:h-4" />
+                  <span>{formatTime(player.finishTime || 0)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button
+              onClick={onRestartGame}
+              className="flex-1 bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-sm sm:text-base py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Play Again
+            </button>
+            <button
+              onClick={onNewGame}
+              className="flex-1 bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 text-sm sm:text-base py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <Home className="w-4 h-4" />
+              New Game
+            </button>
+          </div>
+          <button
+            onClick={downloadAIFeedback}
+            className="w-full mt-3 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Export AI evaluations ({feedbackCount})
+          </button>
+          <button
+            onClick={downloadHumanMoveData}
+            className="w-full mt-2 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Export human training data ({humanMoveCount})
+          </button>
+        </div>
+        {feedbackDialog}
+      </div>
+    );
   }
-  // after scoring and before returning endTurn in getContinueTurnMove
-if (best && best.length > 0) return { type: 'play', cards: best };
 
-  // If pile is only 9♦ and hand exists, force a play from hand (cannot take)
-  if (pile.length === 1 && hand.length > 0) {
-    const nines = hand.filter(c => c.value === 9);
-    if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
-    const fourVal = hasFourOfSameValue(hand);
-    if (fourVal !== null) return { type: 'play', cards: getCardsOfSameValue(hand, fourVal) };
-    const sorted = [...hand].sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [sorted[0]] };
+  if (gameState.phase === 'paused') {
+    return (
+      <div className="min-h-screen bg-emerald-900 flex items-center justify-center p-4">
+        <div className="bg-emerald-800 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center shadow-2xl border border-emerald-600">
+          <div className="flex items-center justify-center gap-2 sm:gap-3 mb-4 sm:mb-6">
+            <Pause className="w-6 h-6 sm:w-8 sm:h-8 text-amber-300" />
+            <h2 className="text-2xl sm:text-3xl font-bold text-amber-300">Game Paused</h2>
+          </div>
+
+          <div className="flex items-center justify-center gap-2 mb-6 sm:mb-8">
+            <Clock className="w-5 h-5 sm:w-6 sm:h-6 text-emerald-300" />
+            <span className="text-emerald-200 text-xl sm:text-2xl font-mono">{formatTime(elapsedTime)}</span>
+          </div>
+
+          <div className="space-y-3 sm:space-y-4">
+            <button
+              onClick={onResumeGame}
+              className="w-full bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-base sm:text-lg py-4 sm:py-6 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <Play className="w-4 h-4 sm:w-5 sm:h-5" />
+              Resume Game
+            </button>
+
+            <button
+              onClick={onRestartGame}
+              className="w-full bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 text-sm sm:text-base py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Restart Game
+            </button>
+
+            <button
+              onClick={onNewGame}
+              className="w-full bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 text-sm sm:text-base py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <Home className="w-4 h-4" />
+              New Game
+            </button>
+            <button
+              onClick={downloadHumanMoveData}
+              className="w-full bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Export human training data ({humanMoveCount})
+            </button>
+          </div>
+        </div>
+        {feedbackDialog}
+      </div>
+    );
   }
 
-  // Otherwise end turn (only when truly no options)
-  return { type: 'endTurn', cards: [] };
+  const shouldShowHand = currentPlayer && !currentPlayer.hasFinished;
 
-}
+  const canTakeCards = validMoves.canTake && !gameState.canContinueTurn;
 
+  return (
+    <div className="min-h-screen bg-emerald-900 flex flex-col">
+      {/* Top bar */}
+      <div className="bg-emerald-800 border-b border-emerald-600 px-2 sm:px-4 py-3 sm:py-3 flex-shrink-0">
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-1 sm:gap-4">
+            <h1 className="text-base sm:text-xl font-bold text-amber-300">🃏 The Bobby</h1>
+            <span className="text-emerald-300 text-xs hidden sm:inline">
+              Turn {gameState.turnNumber}
+            </span>
+          </div>
 
-// -----------------------------
-// Return AI thinking delay in milliseconds for a given difficulty.
-// - easy: short delay
-// - medium: moderate delay
-// - hard: longer delay with small random jitter
-//
-// Keep delays small enough for UX but large enough to feel natural.
-// -----------------------------
-export function getAIDelay(difficulty: AIDifficulty): number {
-  // base delays (ms)
-  const BASE = {
-    easy: 500,
-    medium: 1000, // previous "hard" behavior moved to medium
-    hard: 1500
-  } as Record<AIDifficulty, number>;
+          <div className="flex items-center gap-3 sm:gap-4">
+            <div className="flex items-center gap-2 bg-emerald-700 px-3 sm:px-4 py-2 sm:py-2 rounded-lg">
+              <Clock className="w-5 h-5 text-amber-300" />
+              <span className="text-white font-mono text-base sm:text-lg">{formatTime(elapsedTime)}</span>
+            </div>
 
-  const base = BASE[difficulty] ?? 400;
+            <button
+              onClick={onPauseGame}
+              className="bg-emerald-700 border border-emerald-500 text-emerald-100 hover:bg-emerald-600 lg:flex hidden items-center gap-1 px-3 py-2 rounded-lg text-sm transition-colors"
+            >
+              <Pause className="w-4 h-4" />
+              Pause
+            </button>
 
-  // Add a small random jitter so AI doesn't feel robotic
-  const jitter = Math.floor(Math.random() * 200) - 100; // -100..+99 ms
+            <button
+              onClick={() => {
+                const next = !mutedState;
+                setMutedState(next);
+                setMuted(next);
+              }}
+              title={mutedState ? 'Unmute' : 'Mute'}
+              className="bg-emerald-700 border border-emerald-500 text-emerald-100 hover:bg-emerald-600 flex items-center px-3 py-2.5 sm:py-2 rounded-lg text-sm transition-colors"
+            >
+              {mutedState ? <VolumeX className="w-5 h-5 sm:w-4 sm:h-4" /> : <Volume2 className="w-5 h-5 sm:w-4 sm:h-4" />}
+            </button>
 
-  // Cap to a sensible range
-  const delay = Math.max(100, base + jitter);
-  return delay;
+            <button
+              onClick={onNewGame}
+              className="bg-emerald-700 border border-emerald-500 text-emerald-100 hover:bg-emerald-600 flex items-center gap-1 px-3 py-2.5 sm:py-2 rounded-lg text-sm transition-colors"
+            >
+              <Home className="w-5 h-5 sm:w-4 sm:h-4" />
+              <span className="hidden sm:inline">New Game</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Main game area */}
+      <div className="flex-none lg:flex-1 flex flex-col lg:flex-row gap-2 sm:gap-4 px-2 pt-2 pb-0 sm:p-4 max-w-6xl mx-auto w-full overflow-hidden">
+        {/* Left sidebar - Players (Desktop) */}
+        <div className="hidden lg:flex lg:w-44 flex-col gap-2 overflow-y-auto flex-shrink-0">
+          <div className="text-emerald-300 text-xs font-medium uppercase tracking-wide mb-1 px-1">Players</div>
+          {gameState.players.map((player: any) => {
+            const isCurrent = player.id === currentPlayer?.id;
+
+            return (
+              <div
+                key={player.id}
+                className={`flex-shrink-0 rounded-lg p-2 border transition-all ${
+                  isCurrent
+                    ? 'border-amber-400 bg-amber-500/10'
+                    : 'border-emerald-600 bg-emerald-800/50'
+                } ${player.hasFinished ? 'opacity-60' : ''}`}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    player.hasFinished ? 'bg-gray-500' : isCurrent ? 'bg-amber-400 animate-pulse' : 'bg-emerald-500'
+                  }`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1">
+                      <span className={`text-sm font-medium truncate ${isCurrent ? 'text-amber-300' : 'text-white'}`}>
+                        {player.name}
+                      </span>
+                      {player.isAI && <span className="text-[10px] text-emerald-400">AI</span>}
+                    </div>
+                    <div className="text-xs text-emerald-400">
+                      {player.hasFinished ? (
+                        <span className="text-amber-400 flex items-center gap-1">
+                          {player.finishPosition === 1 ? <Crown className="w-3 h-3" /> :
+                           player.finishPosition === gameState.players.length ? <Skull className="w-3 h-3" /> : null}
+                          #{player.finishPosition}
+                        </span>
+                      ) : (
+                        `${player.hand.length} cards`
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Center - Pile and actions */}
+        <div className="flex-1 grid grid-rows-[minmax(0,1fr)_auto_minmax(0,1fr)] place-items-center gap-3 sm:gap-4 overflow-y-auto min-h-0">
+          <div className="text-center self-end">
+            <div className="flex items-center gap-1 sm:gap-2 justify-center mb-1 sm:mb-2">
+              <span className="text-emerald-300 text-xs sm:text-sm">Current Turn:</span>
+              <span className="text-amber-300 font-bold text-sm sm:text-lg">{currentPlayer?.name}</span>
+              {currentPlayer?.isAI && <span className="text-[10px] sm:text-xs text-emerald-400">(AI)</span>}
+              {isAIThinking && <span className="text-amber-400 text-xs sm:text-sm animate-pulse">Thinking...</span>}
+            </div>
+          </div>
+
+          <div className="row-start-2 flex items-center justify-center">
+            <GamePile pile={pile} />
+          </div>
+
+          <div className="row-start-3 self-start flex w-full max-w-sm flex-col items-center gap-4 sm:gap-4">
+          {error && (
+            <div className="flex items-center gap-2 bg-red-500 text-white px-3 sm:px-4 py-2 rounded-lg text-sm">
+              <AlertCircle className="w-4 h-4" />
+              {error}
+            </div>
+          )}
+
+          {/* Continue turn banner - 4 Nines Start */}
+          {gameState.canContinueTurn && isHumanTurn && isFourNinesStart && (
+            <div className="bg-purple-600 rounded-lg p-4 sm:p-4 border-2 border-purple-400 shadow-lg w-full">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-2xl">🃏</span>
+                <span className="text-white font-bold text-base sm:text-lg">Lucky Start!</span>
+              </div>
+              <p className="text-purple-100 text-xs sm:text-sm mb-4 sm:mb-3">
+                You have all 4 nines! Play them now or save them for later.
+              </p>
+              <div className="flex gap-4 sm:gap-3">
+                <button
+                  onClick={handlePlayClick}
+                  disabled={selectedCards.length === 0}
+                  className="bg-white hover:bg-gray-100 text-purple-700 font-bold text-xs sm:text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  Play Selected ({selectedCards.length})
+                </button>
+                <button
+                  onClick={handleEndTurnClick}
+                  className="bg-purple-700 border border-purple-500 text-white hover:bg-purple-600 text-xs sm:text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors"
+                >
+                  Save for Later
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Continue turn banner - Regular 4 of a kind */}
+          {gameState.canContinueTurn && isHumanTurn && !isFourNinesStart && (
+            <div className="bg-amber-600 rounded-lg p-4 sm:p-4 border-2 border-amber-400 shadow-lg w-full">
+              <div className="flex items-center gap-2 mb-2">
+                <Zap className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-900" />
+                <span className="text-emerald-900 font-bold text-base sm:text-lg">Combo!</span>
+              </div>
+              <p className="text-emerald-900 text-xs sm:text-sm mb-4 sm:mb-3">
+                You played 4 of a kind! Play another card or end your turn.
+              </p>
+              <div className="flex gap-4 sm:gap-3">
+                <button
+                  onClick={handlePlayClick}
+                  disabled={selectedCards.length === 0}
+                  className="bg-emerald-800 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  Play Selected ({selectedCards.length})
+                </button>
+                <button
+                  onClick={handleEndTurnClick}
+                  className="bg-emerald-800 border border-emerald-600 text-white hover:bg-emerald-700 text-xs sm:text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors"
+                >
+                  End Turn
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Take options popup */}
+          {showTakeOptions && (
+            <div className="bg-emerald-700 rounded-lg p-4 sm:p-4 border border-emerald-500 shadow-lg w-full">
+              <p className="text-emerald-100 mb-4 sm:mb-3 text-center font-medium text-sm sm:text-base">How many cards to take?</p>
+              <div className="flex flex-col sm:flex-row gap-4 sm:gap-3">
+                <button
+                  onClick={handleTake3}
+                  className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors"
+                >
+                  Take 3 Cards
+                </button>
+                <button
+                  onClick={handleTakeAll}
+                  className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors"
+                >
+                  Take All ({takeOptions.takeAllCount})
+                </button>
+              </div>
+              <button
+                onClick={handleCancel}
+                className="w-full mt-4 sm:mt-3 bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 text-sm px-4 py-3 sm:py-2 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* Action buttons - Desktop only */}
+          {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
+            <div className="hidden lg:flex flex-wrap gap-3 justify-center">
+              <button
+                onClick={handlePlayClick}
+                disabled={selectedCards.length === 0}
+                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-6 py-2 text-sm rounded-lg transition-colors disabled:opacity-50"
+              >
+                Play ({selectedCards.length})
+              </button>
+
+              {canTakeCards && (
+                <button
+                  onClick={handleTakeClick}
+                  className="bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 text-sm px-6 py-2 rounded-lg transition-colors"
+                >
+                  Take Cards
+                </button>
+              )}
+            </div>
+          )}
+          </div>
+        </div>
+
+        {/* Right sidebar - Move History (Desktop) */}
+        <div className="hidden lg:flex lg:w-56 flex-col gap-3 flex-shrink-0">
+          <div className="bg-emerald-800 rounded-lg border border-emerald-600 flex flex-col" style={{ maxHeight: '400px' }}>
+            <button
+              onClick={() => setShowHistory(!showHistory)}
+              className="flex items-center justify-between p-3 border-b border-emerald-600 flex-shrink-0"
+            >
+              <div className="flex items-center gap-2">
+                <History className="w-4 h-4 text-amber-400" />
+                <span className="text-white font-medium text-sm">Move History</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-emerald-400 text-xs">{gameState.moveHistory.length}</span>
+                {showHistory ? (
+                  <ChevronUp className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-emerald-400" />
+                )}
+              </div>
+            </button>
+
+            {showHistory && (
+              <div ref={historyContainerRef} className="flex-1 overflow-y-auto p-2 space-y-1 min-h-0">
+                {gameState.moveHistory.length === 0 ? (
+                  <p className="text-emerald-400 text-xs italic text-center py-4">No moves yet</p>
+                ) : (
+                  gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
+                    <div
+                      key={move.id}
+                      className={`text-xs p-2 rounded ${
+                        move.type === 'play'
+                          ? 'bg-emerald-700/50'
+                          : 'bg-amber-900/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-0.5">
+                        <span className={`font-medium ${move.type === 'play' ? 'text-amber-300' : 'text-emerald-300'}`}>
+                          {move.playerName}
+                        </span>
+                        <span className="text-emerald-500 text-[10px]">T{move.turnNumber}</span>
+                      </div>
+                      <div className="text-emerald-200 truncate">
+                        {move.type === 'play' ? (
+                          <span className="flex items-center gap-1">
+                            <span className="text-emerald-400">→</span>
+                            {move.cards.map(c => getCardDisplayName(c)).join(' ')}
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1">
+                            <span className="text-amber-400">↑</span>
+                            Took {move.cards.length}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile: Bottom Section */}
+      <div className="lg:hidden bg-emerald-800 border-t border-emerald-600 flex-shrink-0">
+        {shouldShowHand && (
+          <div className="border-b border-emerald-600 px-2 pt-1 pb-2 sm:p-3">
+            <div className="text-center mb-1">
+              <span className="text-emerald-300 text-xs sm:text-sm">{isHumanTurn ? 'Your' : `${currentPlayer.name}'s`} Hand ({currentPlayer.hand.length} cards)</span>
+            </div>
+            <div className="flex flex-wrap gap-1.5 justify-center">
+              {currentPlayer.hand.map((card: CardType) => {
+                const isSelected = handCardsFaceUp && selectedCards.some(c => c.id === card.id);
+                const valueStr = card.value === 11 ? 'J' : card.value === 12 ? 'Q' : card.value === 13 ? 'K' : card.value === 14 ? 'A' : card.value.toString();
+                const suitSymbol = card.suit === 'hearts' ? '♥' : card.suit === 'diamonds' ? '♦' : card.suit === 'clubs' ? '♣' : '♠';
+                const isRed = card.suit === 'hearts' || card.suit === 'diamonds';
+
+                if (!handCardsFaceUp) {
+                  return (
+                    <div
+                      key={card.id}
+                      className="w-14 h-20 rounded-lg border-2 border-blue-400 bg-blue-600 flex items-center justify-center shadow-sm opacity-75"
+                    >
+                      <div className="w-8 h-12 bg-blue-500 rounded border border-blue-300" />
+                    </div>
+                  );
+                }
+
+                return (
+                  <button
+                    key={card.id}
+                    onClick={() => handleCardSelect(card)}
+                    disabled={!isHumanTurn}
+                    className={`w-14 h-20 rounded-lg border-2 flex flex-col items-center justify-center text-base font-bold transition-all shadow-sm ${
+                      isSelected
+                        ? 'border-amber-400 bg-amber-50 scale-105 shadow-md'
+                        : 'border-slate-300 bg-white hover:border-slate-400 hover:shadow'
+                    } ${!isHumanTurn ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} leading-none`}>
+                      {valueStr}
+                    </span>
+                    <span className={`${isRed ? 'text-red-600' : 'text-slate-900'} text-sm mt-0.5`}>
+                      {suitSymbol}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {isHumanTurn && !showTakeOptions && !gameState.canContinueTurn && (
+          <div className="p-4 sm:p-3 border-b border-emerald-600">
+            <div className="flex gap-4 sm:gap-3 justify-center mb-4 sm:mb-3">
+              <button
+                onClick={handlePlayClick}
+                disabled={selectedCards.length === 0}
+                className="bg-amber-500 hover:bg-amber-600 text-emerald-900 font-bold px-5 py-3 text-sm rounded-lg flex-1 max-w-32 transition-colors disabled:opacity-50"
+              >
+                Play ({selectedCards.length})
+              </button>
+
+              {canTakeCards && (
+                <button
+                  onClick={handleTakeClick}
+                  className="bg-emerald-600 border border-emerald-400 text-white hover:bg-emerald-500 px-5 py-3 text-sm rounded-lg flex-1 max-w-32 transition-colors"
+                >
+                  Take
+                </button>
+              )}
+            </div>
+
+            <div className="flex justify-center lg:hidden">
+              <button
+                onClick={onPauseGame}
+                className="bg-emerald-700 border border-emerald-500 text-emerald-100 hover:bg-emerald-600 py-2 px-4 text-xs font-medium rounded-lg flex items-center gap-2 transition-colors"
+              >
+                <Pause className="w-3 h-3" />
+                Pause
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="p-2 sm:p-3 border-b border-emerald-600">
+          <div className="text-emerald-300 text-[10px] sm:text-xs font-medium uppercase tracking-wide mb-1 sm:mb-2">Players</div>
+          <div className="flex flex-wrap gap-1 sm:gap-2">
+            {gameState.players.map((player: any) => {
+              const isCurrent = player.id === currentPlayer?.id;
+              return (
+                <div
+                  key={player.id}
+                  className={`px-2 py-1 rounded text-[10px] sm:text-xs border ${
+                    isCurrent
+                      ? 'border-amber-400 bg-amber-500/20 text-amber-300'
+                      : 'border-emerald-600 bg-emerald-700/50 text-emerald-200'
+                  } ${player.hasFinished ? 'opacity-60' : ''}`}
+                >
+                  <span className="font-medium">{player.name}</span>
+                  {player.isAI && <span className="text-emerald-400 ml-0.5">AI</span>}
+                  <span className="text-emerald-400 ml-1">
+                    {player.hasFinished ? `#${player.finishPosition}` : `(${player.hand.length})`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="p-2 sm:p-3">
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className="flex items-center justify-between w-full"
+          >
+            <div className="flex items-center gap-1 sm:gap-2">
+              <History className="w-3 h-3 sm:w-4 sm:h-4 text-amber-400" />
+              <span className="text-white font-medium text-xs sm:text-sm">Move History</span>
+              <span className="text-emerald-400 text-[10px] sm:text-xs">({gameState.moveHistory.length})</span>
+            </div>
+            {showHistory ? (
+              <ChevronUp className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
+            ) : (
+              <ChevronDown className="w-3 h-3 sm:w-4 sm:h-4 text-emerald-400" />
+            )}
+          </button>
+
+          {showHistory && (
+            <div ref={historyContainerRef} className="mt-2 sm:mt-3 space-y-1 max-h-24 sm:max-h-32 overflow-y-auto">
+              {gameState.moveHistory.length === 0 ? (
+                <p className="text-emerald-400 text-[10px] sm:text-xs italic">No moves yet</p>
+              ) : (
+                gameState.moveHistory.slice().reverse().map((move: PlayerMove) => (
+                  <div
+                    key={move.id}
+                    className={`text-[10px] sm:text-xs p-1.5 sm:p-2 rounded ${
+                      move.type === 'play'
+                        ? 'bg-emerald-700/50'
+                        : 'bg-amber-900/30'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-0.5">
+                      <span className={`font-medium ${move.type === 'play' ? 'text-amber-300' : 'text-emerald-300'}`}>
+                        {move.playerName}
+                      </span>
+                      <span className="text-emerald-500 text-[8px] sm:text-[10px]">T{move.turnNumber}</span>
+                    </div>
+                    <div className="text-emerald-200 truncate">
+                      {move.type === 'play' ? (
+                        <span className="flex items-center gap-1">
+                          <span className="text-emerald-400">→</span>
+                          {move.cards.map(c => getCardDisplayName(c)).join(' ')}
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <span className="text-amber-400">↑</span>
+                          Took {move.cards.length}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Desktop: Player Hand at bottom */}
+      {shouldShowHand && (
+        <div className="hidden lg:block bg-emerald-800 border-t border-emerald-600 p-4 flex-shrink-0">
+          <div className="max-w-5xl mx-auto">
+            <div className="text-center mb-3">
+              <span className="text-emerald-300 text-sm">{isHumanTurn ? 'Your' : `${currentPlayer.name}'s`} Hand ({currentPlayer.hand.length} cards)</span>
+            </div>
+            <PlayerHand
+              hand={currentPlayer.hand}
+              selectedCards={selectedCards}
+              onCardSelect={handleCardSelect}
+              disabled={!isHumanTurn}
+              faceUp={handCardsFaceUp}
+            />
+          </div>
+        </div>
+      )}
+
+      {showConfirm && (
+        <ConfirmPopup
+          message={getConfirmMessage()}
+          onConfirm={handleConfirm}
+          onCancel={handleCancel}
+        />
+      )}
+
+      {feedbackDialog}
+    </div>
+  );
 }
