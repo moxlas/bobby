@@ -927,6 +927,16 @@ export function getAIMove(state: GameState, playerId: number): AIMove {
   const options = state.options;
   const difficulty = options.aiDifficulty;
 
+  const isSpecialNineOpening = state.pile.length === 1 &&
+    state.pile[0].value === 9 &&
+    state.pile[0].suit === 'diamonds';
+  if (options.specialNinesRule && isSpecialNineOpening) {
+    const remainingNines = player.hand.filter(card => card.value === 9);
+    if (remainingNines.length === 3) {
+      return { type: 'play', cards: remainingNines };
+    }
+  }
+
   if (difficulty === 'easy') return getEasyAIMove(player.hand, state.pile, options);
   if (difficulty === 'medium') return getMediumAIMove(state, playerId);
 
