@@ -1,6 +1,7 @@
 import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
 import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
 import { getNextPlayerIndex, getTakeOptions, validatePlay, playCards, takeCards, endTurn } from './gameLogic';
+import { getDemonstratedHighPileTakeRate, getDemonstratedPickupAdjustment, getDemonstratedQuadBreakShare } from './humanMoveTraining';
 
 export type AIMove = { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' };
 
@@ -406,6 +407,12 @@ function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state
 
   const playValue = cardsToPlay[0].value;
 
+  // A single card should not break up a four-of-a-kind while another legal
+  // card can be played, unless a high single has real blocking value.
+  if (cardsToPlay.length === 1 && hand.filter(card => card.value === playValue).length === 4) {
+    score += getFourOfAKindBreakPenalty(playValue, pile, opponentInfo.opponentCloseToWin);
+  }
+
   if (playValue >= 11) {
     const highCardCount = cardsToPlay.length;
     score += SCORE_WEIGHTS.HIGH_CARD_PENALTY * highCardCount;
@@ -446,6 +453,23 @@ function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state
   }
 
   return score;
+}
+
+function getFourOfAKindBreakPenalty(playValue: number, pile: Card[], opponentCloseToWin: boolean) {
+  const topValue = pile[pile.length - 1]?.value ?? 9;
+
+  // In the supplied expert demonstrations, 9 of 62 quad states broke one
+  // card from the set. Every example used Q/K/A on a pile of 10 or higher;
+  // none broke a quad on a 9. Keep that observed distinction, while relaxing
+  // the penalty further when an opponent is close to finishing.
+  if (topValue >= 10 && playValue >= 12 && playValue > topValue && playValue - topValue <= 3) {
+    const breakSupport = getDemonstratedQuadBreakShare(playValue);
+    const basePenalty = Math.round(-140 + 90 * breakSupport);
+    return opponentCloseToWin ? basePenalty + 40 : basePenalty;
+  }
+
+  if (topValue <= 9 && opponentCloseToWin && playValue >= 13) return -160;
+  return -500;
 }
 
 function evaluateHandComposition(hand: Card[]) {
@@ -663,6 +687,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     const takeOptions = getTakeOptions(pile, state.options);
     const takeCount = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
     const cardsToTake = pile.slice(-takeCount);
+    score += getDemonstratedPickupAdjustment(topValue);
     // Taking adds cards, but can be useful when it improves hand structure or
     // creates a four of a kind that can be shed on a later turn.
     score -= takeCount * 18;
@@ -682,7 +707,8 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     // Preserve those top answers when there is still a multi-card hand to play.
     const legalAnswers = hand.filter(card => card.value >= topValue);
     if (hand.length > 1 && legalAnswers.length > 0 && legalAnswers.every(card => card.value >= 13)) {
-      score += 55;
+      const demonstratedTakeRate = getDemonstratedHighPileTakeRate(topValue === 14 ? 14 : 13);
+      score += Math.round(30 + 85 * demonstratedTakeRate);
       score += Math.min(15, Math.max(0, legalAnswers.length - 1) * 5);
       if (candidate.takeType === 'takeAll' && takeCount >= 8) score += 20;
     }
@@ -726,7 +752,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
       // and can stop the opponent from shedding or completing a same-rank set.
       for (const lowerValue of new Set(hand.filter(card => card.value < playedValue).map(card => card.value))) {
         const heldHigherCount = hand.filter(card => card.value === playedValue).length;
-        if (heldHigherCount < 2) continue;
+        if (heldHigherCount < 2 || heldHigherCount === 4) continue;
         const opponentMatchProbability = probabilityAnyOpponentHasValue(tracker, state, playerId, lowerValue);
         const rankPairBlockBonus = heldHigherCount >= 3 ? 42 : 22;
         score += rankPairBlockBonus * opponentMatchProbability;
@@ -734,8 +760,8 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
 
       // Conversely, avoid spending a low card when we hold a pair or triple
       // above it and an opponent may be waiting to play that same low rank.
-      for (const [higherValue, heldCount] of higherRankCounts) {
-        if (heldCount < 2) continue;
+      for (const heldCount of higherRankCounts.values()) {
+        if (heldCount < 2 || heldCount === 4) continue;
         const opponentMatchProbability = probabilityAnyOpponentHasValue(tracker, state, playerId, playedValue);
         const lowCardRiskPenalty = heldCount >= 3 ? 48 : 26;
         score -= lowCardRiskPenalty * opponentMatchProbability;
@@ -1183,14 +1209,20 @@ function getEasyAIMove(hand: Card[], pile: Card[], options: GameOptions): AIMove
     if (nines.length >= 1) return { type: 'play', cards: [nines[0]] };
   }
   const takeOpts = getTakeOptions(pile, options);
-  if (takeOpts.canTake3 && Math.random() < 0.2) {
+  if (takeOpts.canTake3 && Math.random() < 0.35) {
     return { type: 'take', cards: [], takeType: 'take3' };
   }
   const validCards = hand.filter(c => c.value >= topCard.value);
   if (validCards.length > 0) {
+    const preservesFourOfAKind = validCards.filter(card => {
+      const breaksQuad = hand.filter(held => held.value === card.value).length === 4;
+      const highSingleCanBlock = topCard.value >= 10 && card.value >= 12 && card.value > topCard.value && card.value - topCard.value <= 3;
+      return !breaksQuad || highSingleCanBlock;
+    });
+    const cardsToChooseFrom = preservesFourOfAKind.length > 0 ? preservesFourOfAKind : validCards;
     // Easy chooses a legal card without weighing card value, groups, or future
-    // turns. This keeps it unpredictable while leaving strategic play to higher levels.
-    const card = validCards[Math.floor(Math.random() * validCards.length)];
+    // turns, but it won't split a four-of-a-kind when another card is playable.
+    const card = cardsToChooseFrom[Math.floor(Math.random() * cardsToChooseFrom.length)];
     return { type: 'play', cards: [card] };
   }
   // If pile is only 9♦ and hand exists, force a play (cannot take)
