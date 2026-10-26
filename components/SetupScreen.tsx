@@ -64,6 +64,7 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
   const [allowTakeAllCards, setAllowTakeAllCards] = useState(DEFAULT_OPTIONS.allowTakeAllCards);
   const [fourOfAKindRule, setFourOfAKindRule] = useState(DEFAULT_OPTIONS.fourOfAKindRule);
   const [aiDifficulty, setAiDifficulty] = useState<AIDifficulty>(DEFAULT_OPTIONS.aiDifficulty);
+  const [aiEvaluationEnabled, setAiEvaluationEnabled] = useState(DEFAULT_OPTIONS.aiEvaluationEnabled);
 
   const handlePlayerCountChange = (count: number) => {
     setPlayerCount(count);
@@ -109,6 +110,7 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
       allowTakeAllCards,
       fourOfAKindRule,
       aiDifficulty,
+      aiEvaluationEnabled,
     };
 
     onStartGame(players, options);
@@ -278,6 +280,19 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
                         </button>
                       ))}
                     </div>
+                  </div>
+
+                  <div className="flex items-start justify-between gap-4 border-t border-emerald-600/50 pt-4">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <Zap className="w-4 h-4 text-amber-400" />
+                        <span className="text-white font-medium text-sm">AI Move Evaluation</span>
+                      </div>
+                      <p className="text-emerald-400 text-xs">
+                        Ask for feedback after AI moves and save evaluation data. Turn off to hide prompts and stop recording AI evaluations.
+                      </p>
+                    </div>
+                    <Toggle enabled={aiEvaluationEnabled} onToggle={() => setAiEvaluationEnabled(enabled => !enabled)} />
                   </div>
                 </div>
               )}

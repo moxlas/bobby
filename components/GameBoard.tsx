@@ -429,19 +429,21 @@ export function GameBoard({
         onPlayCardsRef.current(player.id, [], false);
       }
 
-      const feedbackCandidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
-      const hadMoveChoice = feedbackCandidates.some(candidate => candidate.type === 'play');
-      if (hadMoveChoice) {
-        setFeedbackMode('rating');
-        setFeedbackError(null);
-        setFeedbackHidden(false);
-        setShowAICardsDuringFeedback(false);
-        setPendingAIFeedback({
-          stateBeforeMove: state,
-          playerId: player.id,
-          chosenMove: executedMove,
-          candidates: feedbackCandidates,
-        });
+      if (state.options.aiEvaluationEnabled) {
+        const feedbackCandidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
+        const hadMoveChoice = feedbackCandidates.some(candidate => candidate.type === 'play');
+        if (hadMoveChoice) {
+          setFeedbackMode('rating');
+          setFeedbackError(null);
+          setFeedbackHidden(false);
+          setShowAICardsDuringFeedback(false);
+          setPendingAIFeedback({
+            stateBeforeMove: state,
+            playerId: player.id,
+            chosenMove: executedMove,
+            candidates: feedbackCandidates,
+          });
+        }
       }
       setIsAIThinking(false);
     };
@@ -705,13 +707,15 @@ export function GameBoard({
               New Game
             </button>
           </div>
-          <button
-            onClick={downloadAIFeedback}
-            className="w-full mt-3 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            Export AI evaluations ({feedbackCount})
-          </button>
+          {gameState.options.aiEvaluationEnabled && (
+            <button
+              onClick={downloadAIFeedback}
+              className="w-full mt-3 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Export AI evaluations ({feedbackCount})
+            </button>
+          )}
           <button
             onClick={downloadHumanMoveData}
             className="w-full mt-2 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
