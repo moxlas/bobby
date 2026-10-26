@@ -612,6 +612,14 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
         score += 4;
       }
     }
+    // Human evaluations repeatedly preferred taking cards over spending a
+    // King or Ace when those were the only cards that could answer the pile.
+    // Preserve those top answers when there is still a multi-card hand to play.
+    const legalAnswers = hand.filter(card => card.value >= topValue);
+    if (hand.length > 1 && legalAnswers.length > 0 && legalAnswers.every(card => card.value >= 13)) {
+      score += 35;
+      if (candidate.takeType === 'takeAll' && takeCount >= 8) score += 20;
+    }
     if (opponentInfo.opponentCloseToWin && cardsToTake.some(card => card.value >= topValue)) score += 12;
     return score;
   }
@@ -626,8 +634,8 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
   if (candidate.type === 'play') {
     for (const c of candidate.cards) {
       // A higher card is more flexible later, so its cost rises with rank.
-      const preservationCost = Math.pow(c.value - 9, 1.35) * 2.6;
-      score -= preservationCost + (c.value === 14 ? 8 : c.value === 13 ? 4 : 0);
+      const preservationCost = Math.pow(c.value - 9, 1.35) * 4;
+      score -= preservationCost + (c.value === 14 ? 12 : c.value === 13 ? 6 : 0);
     }
     // Prefer the lowest card that still makes the next player spend a higher
     // card or pick up. This avoids wasting an Ace when a King does the job.
