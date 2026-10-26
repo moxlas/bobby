@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Card as CardType, GameOptions, PlayerMove } from '../types/game';
 import { PlayerHand } from './PlayerHand';
 import { GamePile } from './GamePile';
+import { Card } from './Card';
 import { ConfirmPopup } from './ConfirmPopup';
 import { validatePlay, getTakeOptions, getValidMoves } from '../utils/gameLogic';
 import { getAIMove, getAIMoveCandidates, getAIDelay, getContinueTurnMove } from '../utils/aiLogic';
@@ -17,7 +18,7 @@ import {
   playCardSound, playTakeSound, playComboSound,
   playWinSound, playLoseSound, playYourTurnSound, playClickSound,
 } from '../utils/sounds';
-import { ArrowRight, Clock, RotateCcw, Home, AlertCircle, Pause, Play, Zap, History, ChevronDown, ChevronUp, Crown, Skull, Volume2, VolumeX, Download } from 'lucide-react';
+import { ArrowRight, Clock, RotateCcw, Home, AlertCircle, Pause, Play, Zap, History, ChevronDown, ChevronUp, Crown, Skull, Volume2, VolumeX, Download, Eye, EyeOff, Minimize2 } from 'lucide-react';
 
 interface GameBoardProps {
   gameState: any;
@@ -72,6 +73,9 @@ interface AIFeedbackDialogProps {
   onBack: () => void;
   onSkip: () => void;
   onExport: () => void;
+  showAICards: boolean;
+  onToggleAICards: () => void;
+  onHide: () => void;
 }
 
 function AIFeedbackDialog({
@@ -86,11 +90,15 @@ function AIFeedbackDialog({
   onBack,
   onSkip,
   onExport,
+  showAICards,
+  onToggleAICards,
+  onHide,
 }: AIFeedbackDialogProps) {
   const alternativeMoves = pending.candidates.filter(
     candidate => getAIFeedbackMoveKey(candidate) !== getAIFeedbackMoveKey(pending.chosenMove),
   );
   const playerName = pending.stateBeforeMove.players.find((player: any) => player.id === pending.playerId)?.name;
+  const aiHand: CardType[] = pending.stateBeforeMove.players.find((player: any) => player.id === pending.playerId)?.hand ?? [];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="presentation">
@@ -108,9 +116,27 @@ function AIFeedbackDialog({
             <p className="mt-1 text-sm text-emerald-200">{playerName} chose:</p>
             <p className="mt-1 font-semibold text-white">{describeAIFeedbackMove(pending.chosenMove)}</p>
           </div>
-          <span className="shrink-0 rounded-full bg-emerald-800 px-2.5 py-1 text-xs text-emerald-200">
-            {feedbackCount} saved
-          </span>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="rounded-full bg-emerald-800 px-2.5 py-1 text-xs text-emerald-200">{feedbackCount} saved</span>
+            <button onClick={onHide} aria-label="Hide evaluation prompt" title="Hide prompt to inspect the board" className="rounded-lg p-2 text-emerald-200 hover:bg-emerald-800 hover:text-white">
+              <Minimize2 className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="mb-4 rounded-lg border border-emerald-700 bg-emerald-950/40 p-3">
+          <button onClick={onToggleAICards} className="flex w-full items-center justify-between gap-3 text-left text-sm font-medium text-emerald-100" aria-pressed={showAICards}>
+            <span className="flex items-center gap-2">{showAICards ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />} Show AI cards face up</span>
+            <span className={`rounded-full px-2 py-0.5 text-xs ${showAICards ? 'bg-amber-400 text-emerald-950' : 'bg-emerald-800 text-emerald-200'}`}>{showAICards ? 'On' : 'Off'}</span>
+          </button>
+          {showAICards && (
+            <div className="mt-3">
+              <p className="mb-2 text-xs text-emerald-300">{playerName}'s hand before the move ({aiHand.length} cards)</p>
+              <div className="flex max-h-36 flex-wrap justify-center gap-1 overflow-y-auto">
+                {aiHand.map(card => <Card key={card.id} card={{ ...card, faceUp: true }} size="sm" disabled />)}
+              </div>
+            </div>
+          )}
         </div>
 
         {mode === 'rating' ? (
@@ -181,6 +207,8 @@ export function GameBoard({
   const [pendingAIFeedback, setPendingAIFeedback] = useState<PendingAIFeedback | null>(null);
   const [feedbackMode, setFeedbackMode] = useState<'rating' | 'chooseMove'>('rating');
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [feedbackHidden, setFeedbackHidden] = useState(false);
+  const [showAICardsDuringFeedback, setShowAICardsDuringFeedback] = useState(false);
   const [feedbackCount, setFeedbackCount] = useState(() => getAIFeedbackRecords().length);
   const historyContainerRef = useRef<HTMLDivElement>(null);
   const prevPlayerIndexRef = useRef<number | null>(null);
@@ -399,6 +427,8 @@ export function GameBoard({
       if (hadMoveChoice) {
         setFeedbackMode('rating');
         setFeedbackError(null);
+        setFeedbackHidden(false);
+        setShowAICardsDuringFeedback(false);
         setPendingAIFeedback({
           stateBeforeMove: state,
           playerId: player.id,
@@ -518,12 +548,16 @@ export function GameBoard({
     setFeedbackError(null);
     setFeedbackMode('rating');
     setPendingAIFeedback(null);
+    setFeedbackHidden(false);
+    setShowAICardsDuringFeedback(false);
   };
 
   const skipAIFeedback = () => {
     setFeedbackError(null);
     setFeedbackMode('rating');
     setPendingAIFeedback(null);
+    setFeedbackHidden(false);
+    setShowAICardsDuringFeedback(false);
   };
 
   const downloadAIFeedback = () => {
@@ -558,7 +592,15 @@ export function GameBoard({
     return '';
   };
 
-  const feedbackDialog = pendingAIFeedback ? (
+  const feedbackDialog = pendingAIFeedback && feedbackHidden ? (
+    <button
+      onClick={() => setFeedbackHidden(false)}
+      className="fixed right-4 top-4 z-50 flex items-center gap-2 rounded-full border border-amber-400 bg-emerald-900 px-4 py-3 font-semibold text-amber-300 shadow-xl transition-colors hover:bg-emerald-800"
+    >
+      <Eye className="h-4 w-4" />
+      Show AI evaluation
+    </button>
+  ) : pendingAIFeedback ? (
     <AIFeedbackDialog
       pending={pendingAIFeedback}
       mode={feedbackMode}
@@ -571,6 +613,9 @@ export function GameBoard({
       onBack={() => setFeedbackMode('rating')}
       onSkip={skipAIFeedback}
       onExport={downloadAIFeedback}
+      showAICards={showAICardsDuringFeedback}
+      onToggleAICards={() => setShowAICardsDuringFeedback(value => !value)}
+      onHide={() => setFeedbackHidden(true)}
     />
   ) : null;
 
