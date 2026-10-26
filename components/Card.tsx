@@ -1,4 +1,3 @@
-import React from 'react';
 import { Card as CardType } from '../types/game';
 
 interface CardProps {
@@ -33,14 +32,14 @@ export function Card({ card, onClick, isSelected, disabled, size = 'md' }: CardP
     md: 'w-20 h-28',
     lg: 'w-24 h-32',
   };
-  
+
   const suitSymbol = SUIT_SYMBOLS[card.suit] || '?';
   const suitColor = SUIT_COLORS[card.suit] || 'text-gray-900';
   const valueDisplay = VALUE_DISPLAY[card.value] || String(card.value);
 
   if (!card.faceUp) {
     return (
-      <div 
+      <div
         className={`${sizeClasses[size]} bg-blue-600 rounded-lg border-2 border-blue-400 flex items-center justify-center cursor-pointer shadow-md ${disabled ? 'opacity-50' : ''}`}
         onClick={onClick}
       >
@@ -50,7 +49,7 @@ export function Card({ card, onClick, isSelected, disabled, size = 'md' }: CardP
   }
 
   return (
-    <div 
+    <div
       className={`${sizeClasses[size]} bg-white rounded-lg border-2 ${isSelected ? 'border-amber-400 ring-2 ring-amber-300' : 'border-gray-300'} flex flex-col items-center justify-between p-1.5 cursor-pointer shadow-md hover:shadow-lg transition-shadow ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
       onClick={disabled ? undefined : onClick}
     >
