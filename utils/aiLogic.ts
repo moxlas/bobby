@@ -235,6 +235,45 @@ function probabilityOpponentCanAnswer(tracker: OpponentCardTracker, state: GameS
   return 1 - probabilityNoAnswer;
 }
 
+function probabilityOpponentHasValue(tracker: OpponentCardTracker, state: GameState, opponentId: number, value: number) {
+  const opponent = state.players.find(player => player.id === opponentId);
+  if (!opponent || opponent.hasFinished) return 0;
+
+  const knownCards = tracker.knownHands.get(opponentId) ?? [];
+  if (knownCards.some(card => card.value === value)) return 1;
+
+  const unknownSlots = Math.max(0, opponent.hand.length - knownCards.length);
+  const unknownCeiling = tracker.unknownValueCeilings.get(opponentId);
+  if (unknownSlots === 0 || (unknownCeiling !== undefined && value >= unknownCeiling)) return 0;
+
+  let total = 0;
+  for (let candidateValue = 9; candidateValue <= 14; candidateValue++) {
+    if (unknownCeiling !== undefined && candidateValue >= unknownCeiling) continue;
+    total += Math.max(0, tracker.unknownCounts.get(candidateValue) ?? 0);
+  }
+  const matchingCards = Math.max(0, tracker.unknownCounts.get(value) ?? 0);
+  if (total === 0 || matchingCards === 0) return 0;
+
+  const nonMatchingCards = total - matchingCards;
+  if (unknownSlots > nonMatchingCards) return 1;
+
+  let probabilityNoMatch = 1;
+  for (let draw = 0; draw < unknownSlots; draw++) {
+    probabilityNoMatch *= (nonMatchingCards - draw) / (total - draw);
+  }
+  return 1 - probabilityNoMatch;
+}
+
+function probabilityAnyOpponentHasValue(tracker: OpponentCardTracker, state: GameState, playerId: number, value: number) {
+  let probabilityNoOpponentHasValue = 1;
+  for (const opponent of state.players) {
+    if (opponent.id === playerId || opponent.hasFinished) continue;
+    const probability = probabilityOpponentHasValue(tracker, state, opponent.id, value);
+    probabilityNoOpponentHasValue *= 1 - probability;
+  }
+  return 1 - probabilityNoOpponentHasValue;
+}
+
 // -----------------------------
 // Rule enforcement helpers
 // -----------------------------
@@ -518,11 +557,15 @@ function shouldUseFourOfAKind(cardsToPlay: Card[], hand: Card[], state: GameStat
   const currentIndex = state.players.findIndex(player => player.id === playerId);
   const nextIndex = getNextPlayerIndex(currentIndex, state.players);
   const nextPlayer = state.players[nextIndex];
-  if (!nextPlayer || nextPlayer.hasFinished || nextPlayer.hand.length > 2) return false;
+  if (!nextPlayer || nextPlayer.hasFinished || nextPlayer.hand.length > 3) return false;
 
-  // A higher pile top can strand a near-winning opponent with only low cards.
+  // Save the quad unless raising the pile is likely to strand the next player
+  // with only lower cards. The closer they are to finishing, the less certainty
+  // we require before using the quad as a block.
   const tracker = buildOpponentCardTracker(state, playerId);
-  return probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, value) < 0.5;
+  const blockProbability = 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, value);
+  const requiredBlockProbability = nextPlayer.hand.length === 1 ? 0.35 : nextPlayer.hand.length === 2 ? 0.5 : 0.67;
+  return blockProbability >= requiredBlockProbability;
 }
 
 export function getAIMoveCandidates(state: GameState, playerId: number, continuingTurn = state.canContinueTurn): AIMove[] {
@@ -671,6 +714,34 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
       if (tensInHand >= 3) score += 20;
       else if (tensInHand === 2) score += 10;
     }
+
+    if (candidate.cards.length === 1) {
+      const higherRankCounts = new Map<number, number>();
+      for (const card of hand) {
+        if (card.value > playedValue) higherRankCounts.set(card.value, (higherRankCounts.get(card.value) ?? 0) + 1);
+      }
+
+      // Prefer a higher card from a pair or triple when an opponent is likely
+      // holding one of our lower ranks. The higher play makes that rank illegal
+      // and can stop the opponent from shedding or completing a same-rank set.
+      for (const lowerValue of new Set(hand.filter(card => card.value < playedValue).map(card => card.value))) {
+        const heldHigherCount = hand.filter(card => card.value === playedValue).length;
+        if (heldHigherCount < 2) continue;
+        const opponentMatchProbability = probabilityAnyOpponentHasValue(tracker, state, playerId, lowerValue);
+        const rankPairBlockBonus = heldHigherCount >= 3 ? 42 : 22;
+        score += rankPairBlockBonus * opponentMatchProbability;
+      }
+
+      // Conversely, avoid spending a low card when we hold a pair or triple
+      // above it and an opponent may be waiting to play that same low rank.
+      for (const [higherValue, heldCount] of higherRankCounts) {
+        if (heldCount < 2) continue;
+        const opponentMatchProbability = probabilityAnyOpponentHasValue(tracker, state, playerId, playedValue);
+        const lowCardRiskPenalty = heldCount >= 3 ? 48 : 26;
+        score -= lowCardRiskPenalty * opponentMatchProbability;
+      }
+    }
+
     const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
     const nextPlayer = state.players[nextIdx];
     if (nextPlayer && !nextPlayer.hasFinished) {
@@ -691,9 +762,20 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
   }
 
   if (candidate.type === 'play' && candidate.cards.length === 4) {
-    // A quad is valuable only after the shared safety gate allows it: there
-    // are no lower cards left, or it can block a near-winning opponent.
-    score += 150;
+    const remainingAfterQuad = hand.filter(card => !candidate.cards.some(played => played.id === card.id));
+    if (remainingAfterQuad.every(card => card.value >= candidate.cards[0].value)) {
+      // Spending the quad clears the lowest cards remaining in hand.
+      score += 150;
+    } else {
+      // The shared gate permits this only when the next opponent is close to
+      // finishing and is unlikely to have a card that answers the raised rank.
+      const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
+      const nextPlayer = state.players[nextIdx];
+      const blockProbability = nextPlayer
+        ? 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, candidate.cards[0].value)
+        : 0;
+      score += 55 + 90 * blockProbability;
+    }
     if (candidate.cards[0].value === 14) score += 10;
   }
 
