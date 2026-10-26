@@ -14,6 +14,12 @@ import {
   saveAIFeedback,
 } from '../utils/aiFeedback';
 import {
+  createHumanMoveDemonstration,
+  exportHumanMoveDemonstrations,
+  getHumanMoveDemonstrations,
+  saveHumanMoveDemonstration,
+} from '../utils/humanDemonstrations';
+import {
   initAudio, setMuted, isMuted,
   playCardSound, playTakeSound, playComboSound,
   playWinSound, playLoseSound, playYourTurnSound, playClickSound,
@@ -210,6 +216,7 @@ export function GameBoard({
   const [feedbackHidden, setFeedbackHidden] = useState(false);
   const [showAICardsDuringFeedback, setShowAICardsDuringFeedback] = useState(false);
   const [feedbackCount, setFeedbackCount] = useState(() => getAIFeedbackRecords().length);
+  const [humanMoveCount, setHumanMoveCount] = useState(() => getHumanMoveDemonstrations().length);
   const historyContainerRef = useRef<HTMLDivElement>(null);
   const prevPlayerIndexRef = useRef<number | null>(null);
   const finishSoundPlayedRef = useRef(false);
@@ -506,8 +513,10 @@ export function GameBoard({
   };
 
   const handleConfirm = () => {
+    let humanMove: AIFeedbackMove | null = null;
     if (pendingAction === 'play') {
       const validation = validatePlay(selectedCards, pile, isFirstMove, options);
+      humanMove = { type: 'play', cards: selectedCards.map(card => ({ ...card })) };
       if (validation.continueTurn) {
         playComboSound();
       } else {
@@ -515,14 +524,24 @@ export function GameBoard({
       }
       onPlayCards(currentPlayer.id, selectedCards, validation.continueTurn || false);
     } else if (pendingAction === 'take3') {
+      humanMove = { type: 'take', cards: [], takeType: 'take3' };
       playTakeSound();
       onTakeCards(currentPlayer.id, takeOptions.take3Count);
     } else if (pendingAction === 'takeAll') {
+      humanMove = { type: 'take', cards: [], takeType: 'takeAll' };
       playTakeSound();
       onTakeCards(currentPlayer.id, takeOptions.takeAllCount);
     } else if (pendingAction === 'endTurn') {
+      humanMove = { type: 'endTurn', cards: [] };
       playClickSound();
       onEndTurn();
+    }
+
+    if (humanMove && currentPlayer && !currentPlayer.isAI) {
+      const preMoveState = gameState as import('../types/game').GameState;
+      const availableMoves = getAIMoveCandidates(preMoveState, currentPlayer.id, gameState.canContinueTurn);
+      const record = createHumanMoveDemonstration(preMoveState, currentPlayer.id, humanMove, availableMoves);
+      if (saveHumanMoveDemonstration(record)) setHumanMoveCount(getHumanMoveDemonstrations().length);
     }
 
     setShowConfirm(false);
@@ -566,6 +585,16 @@ export function GameBoard({
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = 'bobby-ai-evaluations.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadHumanMoveData = () => {
+    const blob = new Blob([exportHumanMoveDemonstrations()], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'bobby-human-demonstrations.json';
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -683,6 +712,13 @@ export function GameBoard({
             <Download className="w-4 h-4" />
             Export AI evaluations ({feedbackCount})
           </button>
+          <button
+            onClick={downloadHumanMoveData}
+            className="w-full mt-2 bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Export human training data ({humanMoveCount})
+          </button>
         </div>
         {feedbackDialog}
       </div>
@@ -726,6 +762,13 @@ export function GameBoard({
             >
               <Home className="w-4 h-4" />
               New Game
+            </button>
+            <button
+              onClick={downloadHumanMoveData}
+              className="w-full bg-emerald-700 hover:bg-emerald-600 border border-emerald-500 text-emerald-100 font-semibold text-sm py-3 rounded-lg flex items-center justify-center gap-2 transition-colors"
+            >
+              <Download className="w-4 h-4" />
+              Export human training data ({humanMoveCount})
             </button>
           </div>
         </div>
