@@ -413,6 +413,20 @@ function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state
     score += getFourOfAKindBreakPenalty(playValue, pile, opponentInfo.opponentCloseToWin);
   }
 
+  const pileTopValue = pile[pile.length - 1]?.value ?? 9;
+  const hasLowerLegalAnswer = hand.some(card => card.value >= pileTopValue && card.value < playValue);
+  if (
+    cardsToPlay.length === 1 &&
+    playValue >= 13 &&
+    pileTopValue <= 10 &&
+    hasLowerLegalAnswer &&
+    !opponentInfo.opponentCloseToWin
+  ) {
+    // Avoid spending a King or Ace on a low pile when a lower legal card can
+    // answer it. A high card is justified here only to stop a close opponent.
+    score -= 100;
+  }
+
   if (playValue >= 11) {
     const highCardCount = cardsToPlay.length;
     score += SCORE_WEIGHTS.HIGH_CARD_PENALTY * highCardCount;
@@ -750,7 +764,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
       // Prefer a higher card from a pair or triple when an opponent is likely
       // holding one of our lower ranks. The higher play makes that rank illegal
       // and can stop the opponent from shedding or completing a same-rank set.
-      for (const lowerValue of new Set(hand.filter(card => card.value < playedValue).map(card => card.value))) {
+      for (const lowerValue of new Set(hand.filter(card => card.value + 1 === playedValue).map(card => card.value))) {
         const heldHigherCount = hand.filter(card => card.value === playedValue).length;
         if (heldHigherCount < 2 || heldHigherCount === 4) continue;
         const opponentMatchProbability = probabilityAnyOpponentHasValue(tracker, state, playerId, lowerValue);
@@ -760,8 +774,8 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
 
       // Conversely, avoid spending a low card when we hold a pair or triple
       // above it and an opponent may be waiting to play that same low rank.
-      for (const heldCount of higherRankCounts.values()) {
-        if (heldCount < 2 || heldCount === 4) continue;
+      for (const [higherValue, heldCount] of higherRankCounts) {
+        if (higherValue !== playedValue + 1 || heldCount < 2 || heldCount === 4) continue;
         const opponentMatchProbability = probabilityAnyOpponentHasValue(tracker, state, playerId, playedValue);
         const lowCardRiskPenalty = heldCount >= 3 ? 48 : 26;
         score -= lowCardRiskPenalty * opponentMatchProbability;
