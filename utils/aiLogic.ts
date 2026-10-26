@@ -305,7 +305,8 @@ function getLastOpponentContext(state: GameState, playerId: number) {
   return { lastOpponentAction, lastOpponentTop };
 }
 
-function getHumanDemonstrationScore(state: GameState, playerId: number, candidate: any): number {
+function getHumanDemonstrationScores(state: GameState, playerId: number, candidates: AIMove[]): Map<string, number> {
+  const scores = new Map(candidates.map(candidate => [getTrainingMoveKey(candidate), 0]));
   // The compiled demonstrations all use two players and all three rules.
   // Keep the learned preference out of unsupported table/rule configurations.
   if (
@@ -313,10 +314,10 @@ function getHumanDemonstrationScore(state: GameState, playerId: number, candidat
     !state.options.specialNinesRule ||
     !state.options.allowTakeAllCards ||
     !state.options.fourOfAKindRule
-  ) return 0;
+  ) return scores;
 
   const player = state.players.find(entry => entry.id === playerId);
-  if (!player) return 0;
+  if (!player) return scores;
   const handCounts = Array(6).fill(0) as number[];
   const pileCounts = Array(6).fill(0) as number[];
   for (const card of player.hand) handCounts[card.value - 9]++;
@@ -329,7 +330,6 @@ function getHumanDemonstrationScore(state: GameState, playerId: number, candidat
     .sort((a, b) => a - b);
   const openingPile = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
   const lastOpponentContext = getLastOpponentContext(state, playerId);
-  const moveKey = getTrainingMoveKey(candidate);
   const neighbors = HUMAN_MOVE_TRAINING_EXAMPLES.map(example => {
     let distance = 0;
     for (let index = 0; index < 6; index++) {
@@ -352,21 +352,29 @@ function getHumanDemonstrationScore(state: GameState, playerId: number, candidat
     return { example, distance };
   }).sort((a, b) => a.distance - b.distance).slice(0, 10);
 
-  let weightedPreference = 0;
-  let totalWeight = 0;
+  const weightedPreferences = new Map([...scores.keys()].map(key => [key, { preference: 0, weight: 0 }]));
   for (const { example, distance } of neighbors) {
-    if (!example.available.includes(moveKey)) continue;
     const weight = Math.exp(-distance / 1.5);
-    totalWeight += weight;
-    weightedPreference += weight * (example.chosen === moveKey ? 1 : -0.25);
+    for (const [moveKey, totals] of weightedPreferences) {
+      if (!example.available.includes(moveKey)) continue;
+      totals.weight += weight;
+      totals.preference += weight * (example.chosen === moveKey ? 1 : -0.25);
+    }
   }
-  if (totalWeight === 0) return 0;
 
   // The held-out-game move match rate for this compact nearest-neighbor policy
   // is below 70%, so keep its influence bounded and let tactical scoring lead.
-  const confidence = 1 - Math.exp(-totalWeight / 1.5);
-  const preference = weightedPreference / totalWeight;
-  return Math.max(-24, Math.min(32, preference * 32 * confidence));
+  for (const [moveKey, totals] of weightedPreferences) {
+    if (totals.weight === 0) continue;
+    const confidence = 1 - Math.exp(-totals.weight / 1.5);
+    const preference = totals.preference / totals.weight;
+    scores.set(moveKey, Math.max(-24, Math.min(32, preference * 32 * confidence)));
+  }
+  return scores;
+}
+
+function getHumanDemonstrationScore(state: GameState, playerId: number, candidate: AIMove): number {
+  return getHumanDemonstrationScores(state, playerId, [candidate]).get(getTrainingMoveKey(candidate)) ?? 0;
 }
 
 // -----------------------------
@@ -504,7 +512,13 @@ function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state
   // A single card should not break up a four-of-a-kind while another legal
   // card can be played, unless a high single has real blocking value.
   if (cardsToPlay.length === 1 && hand.filter(card => card.value === playValue).length === 4) {
-    score += getFourOfAKindBreakPenalty(playValue, pile, opponentInfo.opponentCloseToWin, hand);
+    score += getFourOfAKindBreakPenalty(
+      playValue,
+      pile,
+      opponentInfo.opponentCloseToWin,
+      hand,
+      state.players.length === 2,
+    );
   }
 
   const pileTopValue = pile[pile.length - 1]?.value ?? 9;
@@ -563,14 +577,20 @@ function evaluatePlayMove(cardsToPlay: Card[], hand: Card[], pile: Card[], state
   return score;
 }
 
-function getFourOfAKindBreakPenalty(playValue: number, pile: Card[], opponentCloseToWin: boolean, hand: Card[]) {
+function getFourOfAKindBreakPenalty(
+  playValue: number,
+  pile: Card[],
+  opponentCloseToWin: boolean,
+  hand: Card[],
+  useDemonstrationStats: boolean,
+) {
   const topValue = pile[pile.length - 1]?.value ?? 9;
 
   // In the combined expert data, 34 of 35 single-card quad breaks were on a
   // pile of 10 or higher. The one low-pile exception broke a King while
   // retaining a higher Ace quad, so allow that narrow structure too.
   if (topValue >= 10 && playValue >= 12 && playValue > topValue && playValue - topValue <= 3) {
-    const breakSupport = getDemonstratedQuadBreakShare(playValue);
+    const breakSupport = useDemonstrationStats ? getDemonstratedQuadBreakShare(playValue) : 0.5;
     const basePenalty = Math.round(-140 + 90 * breakSupport);
     return opponentCloseToWin ? basePenalty + 40 : basePenalty;
   }
@@ -636,7 +656,7 @@ function evaluateHighCardControl(
   const opponentInfo = estimateOpponentStrength(state, playerId);
   let score = 0;
 
-  // In the combined human data, all 69 high singles played while a lower
+  // In the combined human data, all 91 high singles played while a lower
   // legal answer existed still left a King or Ace in hand. Preserve the last
   // high control card unless the pile makes it a necessary response or it
   // blocks an opponent who is close to finishing.
@@ -649,9 +669,11 @@ function evaluateHighCardControl(
 
   // A high card can be worth spending when it makes the opponent pick up and
   // leaves exactly one card that becomes playable after that pickup. Humans
-  // chose take-three in 74 of 77 high-pile pickup examples, so weight that
+  // chose take-three in 106 of 111 high-pile pickup examples, so weight that
   // likely response heavily and keep take-all as a small alternative.
-  if (remainingHand.length === 1) {
+  const activeOpponents = state.players.filter(opponent => opponent.id !== playerId && !opponent.hasFinished);
+  const pickupReturnsTurnToAI = activeOpponents.length === 1;
+  if (remainingHand.length === 1 && pickupReturnsTurnToAI) {
     const nextIndex = getNextPlayerIndex(state.players.findIndex(player => player.id === playerId), state.players);
     const nextPlayer = state.players[nextIndex];
     const forceProbability = nextPlayer
@@ -690,6 +712,35 @@ function evaluateHighCardControl(
     if (nextPlayer && remainingHand[0].value < playedValue) {
       const answerProbability = 1 - forceProbability;
       score -= 120 * answerProbability;
+    }
+  }
+
+  // The expert demonstrations show that opponents frequently pick up a King
+  // or Ace when it is left on top of the pile. Price that exposure for
+  // discretionary high singles too, while leaving the final-card escape
+  // calculation above untouched. The learned rates are only used for the
+  // two-player ruleset represented by the demonstrations.
+  if (remainingHand.length > 1 && state.players.length === 2) {
+    const playerIndex = state.players.findIndex(player => player.id === playerId);
+    const nextIndex = getNextPlayerIndex(playerIndex, state.players);
+    const nextPlayer = state.players[nextIndex];
+    const pileAfterPlay = [...pile, ...cardsToPlay];
+    const takeOptions = getTakeOptions(pileAfterPlay, state.options);
+    const takeCount = takeOptions.canTake3 ? takeOptions.take3Count : takeOptions.takeAllCount;
+    const highCardsOffered = pileAfterPlay
+      .slice(-takeCount)
+      .filter(card => card.value >= 13)
+      .length;
+
+    if (nextPlayer && highCardsOffered > 0) {
+      const forcedTakeProbability = 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue);
+      const demonstratedTakeRate = state.options.specialNinesRule &&
+        state.options.allowTakeAllCards && state.options.fourOfAKindRule
+        ? getDemonstratedHighPileTakeRate(playedValue as 13 | 14)
+        : 0;
+      const pickupProbability = Math.max(forcedTakeProbability, demonstratedTakeRate);
+      const blockingMultiplier = opponentInfo.opponentCloseToWin ? 0.5 : 1;
+      score -= 28 * pickupProbability * highCardsOffered * blockingMultiplier;
     }
   }
 
@@ -812,6 +863,41 @@ export function getAIMoveCandidates(state: GameState, playerId: number, continui
   });
 }
 
+export function getHumanImitationMove(state: GameState, playerId: number): {
+  move: AIMove;
+  usedDemonstration: boolean;
+  demonstrationScore: number;
+} {
+  const player = state.players.find(candidate => candidate.id === playerId);
+  const candidates = getAIMoveCandidates(state, playerId);
+  const scores = getHumanDemonstrationScores(state, playerId, candidates);
+  let bestCandidate: AIMove | null = null;
+  let bestScore = -Infinity;
+  for (const candidate of candidates) {
+    const score = scores.get(getTrainingMoveKey(candidate)) ?? 0;
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  if (bestCandidate && bestScore > 0) {
+    return { move: bestCandidate, usedDemonstration: true, demonstrationScore: bestScore };
+  }
+
+  // When the position is not represented well by the human examples, fall
+  // back to the hard tactical policy without recursively launching another
+  // rollout tree from inside a rollout.
+  const fallbackOptions = { ...state.options, aiDifficulty: 'hard' as const };
+  const fallbackState = { ...state, options: fallbackOptions };
+  const fallbackMove = player
+    ? state.canContinueTurn
+      ? getContinueTurnMove(player.hand, state.pile, 'hard', fallbackOptions, fallbackState, playerId)
+      : getHardAIMove(fallbackState, playerId, false)
+    : { type: 'endTurn' as const, cards: [] };
+  return { move: fallbackMove, usedDemonstration: false, demonstrationScore: Math.max(0, bestScore) };
+}
+
 // -----------------------------
 // Candidate generation (small set) for Hard AI
 // -----------------------------
@@ -878,7 +964,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     const takeOptions = getTakeOptions(pile, state.options);
     const takeCount = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
     const cardsToTake = pile.slice(-takeCount);
-    score += getDemonstratedPickupAdjustment(topValue);
+    if (state.players.length === 2) score += getDemonstratedPickupAdjustment(topValue);
     // Taking adds cards, but can be useful when it improves hand structure or
     // creates a four of a kind that can be shed on a later turn.
     score -= takeCount * 18;
@@ -897,7 +983,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     // King or Ace when those were the only cards that could answer the pile.
     // Preserve those top answers when there is still a multi-card hand to play.
     const legalAnswers = hand.filter(card => card.value >= topValue);
-    if (hand.length > 1 && legalAnswers.length > 0 && legalAnswers.every(card => card.value >= 13)) {
+    if (state.players.length === 2 && hand.length > 1 && legalAnswers.length > 0 && legalAnswers.every(card => card.value >= 13)) {
       const demonstratedTakeRate = getDemonstratedHighPileTakeRate(topValue === 14 ? 14 : 13);
       score += Math.round(30 + 85 * demonstratedTakeRate);
       score += Math.min(15, Math.max(0, legalAnswers.length - 1) * 5);
@@ -1080,6 +1166,7 @@ function sampleHiddenHands(state: GameState, playerId: number): GameState {
 function chooseRolloutMove(state: GameState, playerId: number): AIMove {
   const player = state.players.find(candidate => candidate.id === playerId);
   if (!player || player.hasFinished || player.hand.length === 0) return { type: 'endTurn', cards: [] };
+  if (!player.isAI) return getHumanImitationMove(state, playerId).move;
 
   const candidates = getAIMoveCandidates(state, playerId);
   if (candidates.length === 0) return { type: 'endTurn', cards: [] };
@@ -1208,7 +1295,7 @@ function isHighImpactCandidate(candidate: any, handSize: number) {
   return false;
 }
 
-function getHardAIMove(state: GameState, playerId: number): AIMove {
+function getHardAIMove(state: GameState, playerId: number, searchFuture = true): AIMove {
   const player = state.players.find(p => p.id === playerId)!;
   const hand = player.hand;
   const pile = state.pile;
@@ -1256,22 +1343,25 @@ function getHardAIMove(state: GameState, playerId: number): AIMove {
     const humanDemonstrationScore = getHumanDemonstrationScore(state, playerId, c);
     return { c, score: strategicScore + evaluateCandidate(state, playerId, c) + humanDemonstrationScore };
   });
-  // Spend search time on the six strongest tactical alternatives, while
+  // Spend search time on the strongest tactical alternatives, while
   // preserving quad and immediate-win lines even if their static estimate is
-  // temporarily understated.
+  // temporarily understated. Larger tables use a wider search below.
   const rankedCandidates = [...baseScored].sort((a, b) => b.score - a.score);
-  const rolloutCandidates = rankedCandidates.slice(0, 6).map(entry => entry.c);
+  const searchWidth = state.players.length >= 3 ? 8 : 6;
+  const rolloutCount = state.players.length >= 3 ? 8 : 6;
+  const rolloutCandidates = rankedCandidates.slice(0, searchWidth).map(entry => entry.c);
   const criticalCandidates = baseScored
     .filter(entry => isHighImpactCandidate(entry.c, hand.length))
     .map(entry => entry.c);
   const candidatesForRollout = [...new Map(
     [...rolloutCandidates, ...criticalCandidates].map(candidate => [candidateKey(candidate), candidate]),
   ).values()];
-  const rolloutEstimates = monteCarloEstimates(state, playerId, candidatesForRollout, 6);
+  const rolloutEstimates = searchFuture
+    ? monteCarloEstimates(state, playerId, candidatesForRollout, rolloutCount)
+    : new Map<string, number>();
   const scored = baseScored.map(entry => {
-    // Six imperfect-information futures per shortlisted move. Each future
-    // samples hidden cards from the unseen public pool and follows up to 48
-    // decisions, well beyond a five-ply glance.
+    // Search six futures in two-player games and eight when the table is
+    // larger. Each sampled hidden deal is followed up to 48 decisions.
     const rolloutAdjustment = ((rolloutEstimates.get(candidateKey(entry.c)) ?? 0.5) - 0.5) * 120;
     return { ...entry, score: entry.score + rolloutAdjustment };
   });
