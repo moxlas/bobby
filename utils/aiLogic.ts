@@ -1,6 +1,6 @@
 import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
 import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
-import { getNextPlayerIndex, getTakeOptions, validatePlay } from './gameLogic';
+import { getNextPlayerIndex, getTakeOptions, validatePlay, playCards, takeCards, endTurn } from './gameLogic';
 
 export type AIMove = { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' };
 
@@ -506,6 +506,25 @@ function isUnnecessaryAceOnOpening(cardsToPlay: Card[], hand: Card[], pile: Card
   return remainingHand.some(card => card.value < 14);
 }
 
+function shouldUseFourOfAKind(cardsToPlay: Card[], hand: Card[], state: GameState, playerId: number): boolean {
+  if (cardsToPlay.length !== 4) return true;
+  const value = cardsToPlay[0].value;
+  const remainingHand = hand.filter(card => !cardsToPlay.some(played => played.id === card.id));
+
+  // Save the quad if any lower card remains. Spending it is justified when
+  // this removes the lowest cards still in hand, including a winning play.
+  if (remainingHand.every(card => card.value >= value)) return true;
+
+  const currentIndex = state.players.findIndex(player => player.id === playerId);
+  const nextIndex = getNextPlayerIndex(currentIndex, state.players);
+  const nextPlayer = state.players[nextIndex];
+  if (!nextPlayer || nextPlayer.hasFinished || nextPlayer.hand.length > 2) return false;
+
+  // A higher pile top can strand a near-winning opponent with only low cards.
+  const tracker = buildOpponentCardTracker(state, playerId);
+  return probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, value) < 0.5;
+}
+
 export function getAIMoveCandidates(state: GameState, playerId: number, continuingTurn = state.canContinueTurn): AIMove[] {
   const player = state.players.find(candidate => candidate.id === playerId);
   if (!player || player.hasFinished) return [];
@@ -556,7 +575,8 @@ function generateCandidates(state: GameState, playerId: number) {
     byVal.get(c.value)!.push(c);
   }
   for (const [val, cards] of byVal) {
-    if (cards.length === 4 && val >= topCard.value && options.fourOfAKindRule) candidates.push({ type: 'play', cards: cards.slice() });
+    if (val < topCard.value) continue;
+    if (cards.length === 4 && options.fourOfAKindRule) candidates.push({ type: 'play', cards: cards.slice() });
   }
 
   if (isFirstMove) {
@@ -577,7 +597,9 @@ function generateCandidates(state: GameState, playerId: number) {
     const sig = c.type === 'take' ? `take-${c.takeType}` : `play-${c.cards.map((x: Card) => x.id).join(',')}`;
     if (!sigs.has(sig)) { sigs.add(sig); uniq.push(c); }
   }
-  return uniq;
+  return uniq.filter(candidate =>
+    candidate.type === 'take' || validatePlay(candidate.cards, pile, isFirstMove, options).valid
+  );
 }
 
 // -----------------------------
@@ -587,6 +609,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
   const player = state.players.find(p => p.id === playerId)!;
   const hand = player.hand;
   const pile = state.pile;
+  const topValue = pile[pile.length - 1].value;
   const tracker = buildOpponentCardTracker(state, playerId);
   const opponentInfo = estimateOpponentStrength(state, playerId);
 
@@ -597,7 +620,6 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     const takeOptions = getTakeOptions(pile, state.options);
     const takeCount = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
     const cardsToTake = pile.slice(-takeCount);
-    const topValue = pile[pile.length - 1].value;
     // Taking adds cards, but can be useful when it improves hand structure or
     // creates a four of a kind that can be shed on a later turn.
     score -= takeCount * 18;
@@ -617,7 +639,8 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     // Preserve those top answers when there is still a multi-card hand to play.
     const legalAnswers = hand.filter(card => card.value >= topValue);
     if (hand.length > 1 && legalAnswers.length > 0 && legalAnswers.every(card => card.value >= 13)) {
-      score += 35;
+      score += 55;
+      score += Math.min(15, Math.max(0, legalAnswers.length - 1) * 5);
       if (candidate.takeType === 'takeAll' && takeCount >= 8) score += 20;
     }
     if (opponentInfo.opponentCloseToWin && cardsToTake.some(card => card.value >= topValue)) score += 12;
@@ -632,6 +655,7 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
   if (endgame) score += 20;
 
   if (candidate.type === 'play') {
+    if (candidate.cards.length === hand.length) score += SCORE_WEIGHTS.WINNING_MOVE_BONUS;
     for (const c of candidate.cards) {
       // A higher card is more flexible later, so its cost rises with rank.
       const preservationCost = Math.pow(c.value - 9, 1.35) * 4;
@@ -640,6 +664,13 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     // Prefer the lowest card that still makes the next player spend a higher
     // card or pick up. This avoids wasting an Ace when a King does the job.
     const playedValue = candidate.cards[0].value;
+    // Human demonstrations often spend one of a triple of tens on a nine,
+    // keeping the pair while making the next answer harder than a nine.
+    if (candidate.cards.length === 1 && topValue === 9 && playedValue === 10) {
+      const tensInHand = hand.filter(card => card.value === 10).length;
+      if (tensInHand >= 3) score += 20;
+      else if (tensInHand === 2) score += 10;
+    }
     const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
     const nextPlayer = state.players[nextIdx];
     if (nextPlayer && !nextPlayer.hasFinished) {
@@ -649,16 +680,21 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
       else if (nextHandSize <= 2) score += 35 * forceProbability;
       else if (nextHandSize <= 3) score += 25 * forceProbability;
       else score += 18 * forceProbability;
+      // Hard leans more strongly on tracked unseen cards when the next player
+      // is close to finishing; an unanswered high play can force a pickup.
+      if (nextHandSize <= 2) {
+        score += (nextHandSize === 1 ? 160 : 100) * forceProbability;
+      }
       // Retaining multiple high cards gives options on later turns.
       score += Math.min(3, hand.filter(c => c.value >= 12).length) * (playedValue >= 13 ? 4 : 0);
     }
   }
 
   if (candidate.type === 'play' && candidate.cards.length === 4) {
-    // A legal four of a kind sheds four cards and grants a continuation.
-    // That tempo is valuable even for Aces, which also lock the pile at 14.
-    score += 110;
-    if (candidate.cards[0].value === 14) score += 35;
+    // A quad is valuable only after the shared safety gate allows it: there
+    // are no lower cards left, or it can block a near-winning opponent.
+    score += 150;
+    if (candidate.cards[0].value === 14) score += 10;
   }
 
   const nextIdx = getNextPlayerIndex(state.players.findIndex(p => p.id === playerId), state.players);
@@ -668,7 +704,9 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     ? probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, newTop)
     : 0;
   const forceProb = 1 - probNextCanPlay;
-  score += 10 * forceProb;
+  // Reward plays that public-card tracking predicts will make the next player
+  // spend a higher card or pick up, including before their endgame.
+  score += 45 * forceProb;
 
   if (opponentInfo.opponentCloseToWin) {
     if (candidate.type === 'play' && candidate.cards.some((c: Card) => c.value >= 12)) score += 25;
@@ -699,87 +737,131 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
 // -----------------------------
 // Fast simulator helpers for rollouts
 // -----------------------------
-function fastCloneStateForSim(state: GameState): GameState {
-  return JSON.parse(JSON.stringify(state)) as GameState;
-}
+function sampleHiddenHands(state: GameState, playerId: number): GameState {
+  const sampled = JSON.parse(JSON.stringify(state)) as GameState;
+  const tracker = buildOpponentCardTracker(state, playerId);
+  const unknownCounts = new Map(tracker.unknownCounts);
+  const unseenPlayers = sampled.players
+    .filter(player => player.id !== playerId && !player.hasFinished)
+    .sort(() => Math.random() - 0.5);
 
-function applyCandidateToSim(sim: GameState, playerId: number, candidate: any) {
-  const player = sim.players.find(p => p.id === playerId)!;
-  if (candidate.type === 'play') {
-    for (const c of candidate.cards) {
-      const idx = player.hand.findIndex((h: Card) => h.id === c.id);
-      if (idx >= 0) player.hand.splice(idx, 1);
-      sim.pile.push(c);
-    }
-  } else {
-    const takeCount = candidate.takeType === 'takeAll' ? Math.max(0, sim.pile.length - 1) : Math.min(3, Math.max(0, sim.pile.length - 1));
-    const taken = sim.pile.splice(sim.pile.length - takeCount, takeCount);
-    player.hand.push(...taken);
-  }
-}
-
-function simulateFastPlayout(sim: GameState, aiPlayerId: number, maxSteps = 200): number {
-  let currentIdx = sim.players.findIndex(p => !p.hasFinished && p.hand.length > 0);
-  if (currentIdx === -1) return aiPlayerId;
-  let steps = 0;
-  while (steps < maxSteps) {
-    const player = sim.players[currentIdx];
-    if (!player || player.hasFinished) {
-      currentIdx = (currentIdx + 1) % sim.players.length;
-      steps++;
-      continue;
-    }
-    if (player.hand.length === 0) {
-      player.hasFinished = true;
-      const unfinished = sim.players.filter(p => !p.hasFinished);
-      if (unfinished.length === 1) return unfinished[0].id;
-      currentIdx = (currentIdx + 1) % sim.players.length;
-      steps++;
-      continue;
-    }
-    const top = sim.pile[sim.pile.length - 1];
-    const legal = player.hand.filter((c: Card) => c.value >= top.value);
-    if (legal.length > 0) {
-      legal.sort((a: Card, b: Card) => a.value - b.value);
-      const play = legal[0];
-      const idx = player.hand.findIndex((h: Card) => h.id === play.id);
-      if (idx >= 0) player.hand.splice(idx, 1);
-      sim.pile.push(play);
-    } else {
-      const takeOpts = getTakeOptions(sim.pile, sim.options);
-      if (takeOpts.canTake3) {
-        const takeCount = Math.min(3, Math.max(0, sim.pile.length - 1));
-        const taken = sim.pile.splice(sim.pile.length - takeCount, takeCount);
-        player.hand.push(...taken);
-      } else if (takeOpts.canTakeAll) {
-        const takeCount = Math.max(0, sim.pile.length - 1);
-        const taken = sim.pile.splice(sim.pile.length - takeCount, takeCount);
-        player.hand.push(...taken);
+  for (const opponent of unseenPlayers) {
+    const knownCards = tracker.knownHands.get(opponent.id) ?? [];
+    const slotsToSample = Math.max(0, opponent.hand.length - knownCards.length);
+    const sampledCards: Card[] = [];
+    const ceiling = tracker.unknownValueCeilings.get(opponent.id);
+    for (let slot = 0; slot < slotsToSample; slot++) {
+      let possibleValues = [...unknownCounts.entries()]
+        .filter(([value, count]) => count > 0 && (ceiling === undefined || value < ceiling));
+      if (possibleValues.length === 0) {
+        possibleValues = [...unknownCounts.entries()].filter(([, count]) => count > 0);
       }
+      const total = possibleValues.reduce((sum, [, count]) => sum + count, 0);
+      if (total <= 0) break;
+      let pick = Math.floor(Math.random() * total);
+      let value = possibleValues[0][0];
+      for (const [candidateValue, count] of possibleValues) {
+        if (pick < count) { value = candidateValue; break; }
+        pick -= count;
+      }
+      unknownCounts.set(value, (unknownCounts.get(value) ?? 0) - 1);
+      sampledCards.push({
+        id: `rollout-${opponent.id}-${slot}-${Math.random().toString(36).slice(2, 8)}`,
+        value: value as Card['value'],
+        suit: 'spades',
+        faceUp: false,
+      });
     }
-    if (player.hand.length === 0) {
-      player.hasFinished = true;
-      const unfinished = sim.players.filter(p => !p.hasFinished);
-      if (unfinished.length === 1) return unfinished[0].id;
-      if (player.id === aiPlayerId) return aiPlayerId;
+    opponent.hand = sortHand([...knownCards.map(card => ({ ...card })), ...sampledCards]);
+  }
+  return sampled;
+}
+
+function chooseRolloutMove(state: GameState, playerId: number): AIMove {
+  const player = state.players[playerId];
+  if (!player || player.hasFinished || player.hand.length === 0) return { type: 'endTurn', cards: [] };
+  const isFirstMove = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
+  const plays = getPossiblePlays(player.hand, state.pile, state.options)
+    .filter(cards => validatePlay(cards, state.pile, isFirstMove, state.options).valid);
+
+  if (state.canContinueTurn && plays.length === 0) return { type: 'endTurn', cards: [] };
+  if (plays.length === 0) {
+    const takeOptions = getTakeOptions(state.pile, state.options);
+    if (takeOptions.canTake3) return { type: 'take', cards: [], takeType: 'take3' };
+    if (takeOptions.canTakeAll) return { type: 'take', cards: [], takeType: 'takeAll' };
+    const lowest = [...player.hand].sort((a, b) => a.value - b.value)[0];
+    return lowest ? { type: 'play', cards: [lowest] } : { type: 'endTurn', cards: [] };
+  }
+
+  const quad = plays.find(cards => cards.length === 4 && shouldUseFourOfAKind(cards, player.hand, state, playerId));
+  if (quad) return { type: 'play', cards: quad };
+  const specialNines = plays.find(cards => cards.length === 3 && cards.every(card => card.value === 9));
+  if (isFirstMove && specialNines) return { type: 'play', cards: specialNines };
+  const single = plays.filter(cards => cards.length === 1).sort((a, b) => a[0].value - b[0].value)[0];
+  return single ? { type: 'play', cards: single } : { type: 'endTurn', cards: [] };
+}
+
+function simulateFastPlayout(sim: GameState, aiPlayerId: number, maxSteps = 80): number | null {
+  let steps = 0;
+  const visited = new Set<string>();
+  while (sim.phase === 'playing' && steps < maxSteps) {
+    const position = `${sim.currentPlayerIndex}|${sim.canContinueTurn ? 1 : 0}|${sim.pile.map(card => card.id).join(',')}|${sim.players.map(player => player.hand.map(card => card.id).sort().join(',')).join('|')}`;
+    if (visited.has(position)) break;
+    visited.add(position);
+
+    const player = sim.players[sim.currentPlayerIndex];
+    if (!player || player.hasFinished || player.hand.length === 0) {
+      sim = endTurn(sim);
+      steps++;
+      continue;
     }
-    currentIdx = (currentIdx + 1) % sim.players.length;
+    const move = chooseRolloutMove(sim, player.id);
+    if (move.type === 'play' && move.cards.length > 0) {
+      const isFirstMove = sim.pile.length === 1 && sim.pile[0].value === 9 && sim.pile[0].suit === 'diamonds';
+      const validation = validatePlay(move.cards, sim.pile, isFirstMove, sim.options);
+      sim = validation.valid ? playCards(sim, player.id, move.cards, Boolean(validation.continueTurn)) : endTurn(sim);
+    } else if (move.type === 'take') {
+      const takeOptions = getTakeOptions(sim.pile, sim.options);
+      const count = move.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
+      sim = count > 0 ? takeCards(sim, player.id, count) : endTurn(sim);
+    } else {
+      sim = endTurn(sim);
+    }
     steps++;
   }
-  const finished = sim.players.find(p => p.hand.length === 0);
-  if (finished) return finished.id;
-  return sim.players[Math.floor(Math.random() * sim.players.length)].id;
+  if (sim.phase === 'finished') return sim.finishOrder[0]?.id ?? null;
+
+  const player = sim.players[aiPlayerId];
+  const opponents = sim.players.filter(candidate => candidate.id !== aiPlayerId && !candidate.hasFinished);
+  if (!player || opponents.length === 0) return aiPlayerId;
+  const bestOpponentHand = Math.min(...opponents.map(opponent => opponent.hand.length));
+  if (player.hand.length < bestOpponentHand) return aiPlayerId;
+  if (player.hand.length > bestOpponentHand) return opponents.find(opponent => opponent.hand.length === bestOpponentHand)?.id ?? null;
+  return null;
 }
 
-function monteCarloEstimate(state: GameState, playerId: number, candidate: any, playouts = 30) {
-  let wins = 0;
+function monteCarloEstimate(state: GameState, playerId: number, candidate: any, playouts = 8): number {
+  let result = 0;
   for (let i = 0; i < playouts; i++) {
-    const sim = fastCloneStateForSim(state);
-    applyCandidateToSim(sim, playerId, candidate);
-    const winner = simulateFastPlayout(sim, playerId, 200);
-    if (winner === playerId) wins++;
+    let sim = sampleHiddenHands(state, playerId);
+    if (candidate.type === 'play') {
+      const isFirstMove = sim.pile.length === 1 && sim.pile[0].value === 9 && sim.pile[0].suit === 'diamonds';
+      const validation = validatePlay(candidate.cards, sim.pile, isFirstMove, sim.options);
+      if (!validation.valid) continue;
+      sim = playCards(sim, playerId, candidate.cards, Boolean(validation.continueTurn));
+    } else if (candidate.type === 'take') {
+      const takeOptions = getTakeOptions(sim.pile, sim.options);
+      const count = candidate.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
+      if (count <= 0) continue;
+      sim = takeCards(sim, playerId, count);
+    } else {
+      continue;
+    }
+    const winner = simulateFastPlayout(sim, playerId);
+    if (winner === playerId) result += 1;
+    else if (winner === null) result += 0.5;
   }
-  return wins / playouts;
+  return result / playouts;
 }
 
 // -----------------------------
@@ -809,10 +891,38 @@ function getHardAIMove(state: GameState, playerId: number): AIMove {
   }
 
   const preferredCandidates = candidates.filter(candidate =>
-    candidate.type !== 'play' || !isUnnecessaryAceOnOpening(candidate.cards, hand, pile)
+    candidate.type !== 'play' || (
+      !isUnnecessaryAceOnOpening(candidate.cards, hand, pile) &&
+      shouldUseFourOfAKind(candidate.cards, hand, state, playerId)
+    )
   );
   const candidatesToScore = preferredCandidates.length > 0 ? preferredCandidates : candidates;
-  const scored = candidatesToScore.map(c => ({ c, score: evaluateCandidate(state, playerId, c) }));
+  const scored = candidatesToScore.map(c => {
+    let strategicScore: number;
+    if (c.type === 'play') {
+      strategicScore = evaluatePlayMove(c.cards, hand, pile, state, playerId);
+      const validation = validatePlay(c.cards, pile, pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds', options);
+      if (validation.valid && validation.continueTurn && c.cards.length === 4) {
+        const remainingHand = hand.filter(card => !c.cards.some(played => played.id === card.id));
+        const nextPile = [...pile, ...c.cards];
+        const nextPlays = getPossiblePlays(remainingHand, nextPile, options)
+          .filter(play => validatePlay(play, nextPile, false, options).valid);
+        if (nextPlays.length > 0) {
+          const bestFollowUp = Math.max(...nextPlays.map(play => evaluatePlayMove(play, remainingHand, nextPile, state, playerId)));
+          if (bestFollowUp > 0) strategicScore += bestFollowUp * 0.25;
+        }
+      }
+    } else {
+      const takeOptions = getTakeOptions(pile, options);
+      const takeCount = c.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
+      strategicScore = evaluateTakeMove(takeCount, hand, pile, state, playerId);
+    }
+
+    // Blend heuristic scoring with imperfect-information rollouts. Each rollout
+    // samples opponent hands from public card counts rather than reading them.
+    const rolloutAdjustment = (monteCarloEstimate(state, playerId, c, 4) - 0.5) * 90;
+    return { c, score: strategicScore + evaluateCandidate(state, playerId, c) + rolloutAdjustment };
+  });
   scored.sort((a, b) => b.score - a.score);
 
   const bestMove = scored[0].c;
@@ -851,6 +961,7 @@ function getMediumAIMove(state: GameState, playerId: number): AIMove {
 
   for (const playCards of possiblePlays) {
     if (isUnnecessaryAceOnOpening(playCards, hand, pile)) continue;
+    if (!shouldUseFourOfAKind(playCards, hand, state, playerId)) continue;
     const validation = validatePlay(playCards, pile, isFirstMove, options);
     if (validation.valid) {
       const score = evaluatePlayMove(playCards, hand, pile, state, playerId);
@@ -989,18 +1100,17 @@ function getEasyAIMove(hand: Card[], pile: Card[], options: GameOptions): AIMove
     if (options.specialNinesRule && nines.length >= 3) return { type: 'play', cards: nines.slice(0, 3) };
     if (nines.length >= 1) return { type: 'play', cards: [nines[0]] };
   }
-  const fourValue = hasFourOfSameValue(hand);
-  if (fourValue !== null && fourValue >= topCard.value) {
-    const fourCards = getCardsOfSameValue(hand, fourValue);
-    if (!isUnnecessaryAceOnOpening(fourCards, hand, pile)) return { type: 'play', cards: fourCards };
+  const takeOpts = getTakeOptions(pile, options);
+  if (takeOpts.canTake3 && Math.random() < 0.2) {
+    return { type: 'take', cards: [], takeType: 'take3' };
   }
   const validCards = hand.filter(c => c.value >= topCard.value);
   if (validCards.length > 0) {
-    validCards.sort((a, b) => a.value - b.value);
-    return { type: 'play', cards: [validCards[0]] };
+    // Easy chooses a legal card without weighing card value, groups, or future
+    // turns. This keeps it unpredictable while leaving strategic play to higher levels.
+    const card = validCards[Math.floor(Math.random() * validCards.length)];
+    return { type: 'play', cards: [card] };
   }
-    const takeOpts = getTakeOptions(pile, options);
-
   // If pile is only 9♦ and hand exists, force a play (cannot take)
   if (pile.length === 1 && hand.length > 0) {
     // The opening special move is the three remaining nines, never a mixed set.
@@ -1047,6 +1157,7 @@ export function getContinueTurnMove(
   let bestScore = -Infinity;
   for (const play of possiblePlays) {
     if (isUnnecessaryAceOnOpening(play, hand, pile)) continue;
+    if (difficulty !== 'easy' && !shouldUseFourOfAKind(play, hand, state, playerId)) continue;
     const validation = validatePlay(play, pile, isFirstMove, options);
     if (!validation.valid) continue;
     const score = evaluatePlayMove(play, hand, pile, state, playerId);
