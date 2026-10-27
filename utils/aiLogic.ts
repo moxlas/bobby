@@ -1,4 +1,4 @@
-import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
+import { Card, GameState, GameOptions, AIDifficulty, Player, PlayerMove } from '../types/game';
 import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
 import { getNextPlayerIndex, getTakeOptions, validatePlay, playCards, takeCards, endTurn } from './gameLogic';
 import { HUMAN_MOVE_TRAINING, getDemonstratedHighPileTakeRate, getDemonstratedPickupAdjustment, getDemonstratedQuadBreakShare } from './humanMoveTraining';
@@ -415,6 +415,43 @@ function evaluateLowCardBlock(
   const evenRaceMultiplier = Math.abs(hand.length - nextPlayer.hand.length) <= 2 ? 1.1 : 1;
 
   return Math.min(64, blockedCards * 20) * rankEfficiency * closeOpponentMultiplier * evenRaceMultiplier;
+}
+
+function getHighCardBlockingPenalty(
+  cardsToPlay: Card[],
+  hand: Card[],
+  pile: Card[],
+  state: GameState,
+  playerId: number,
+  tracker: OpponentCardTracker,
+) {
+  if (cardsToPlay.length !== 1 || cardsToPlay.length === hand.length || cardsToPlay[0].value < 13) return 0;
+
+  const topValue = pile[pile.length - 1]?.value ?? 9;
+  const midAlternatives = hand.filter(card => card.value >= topValue && card.value >= 11 && card.value <= 12);
+  if (midAlternatives.length === 0) return 0;
+
+  const playerIndex = state.players.findIndex(player => player.id === playerId);
+  const nextPlayer = state.players[getNextPlayerIndex(playerIndex, state.players)];
+  if (!nextPlayer || nextPlayer.hasFinished) return 0;
+
+  const bestMidBlock = Math.max(...midAlternatives.map(card =>
+    evaluateLowCardBlock(card, hand, pile, state, playerId, tracker),
+  ));
+  if (bestMidBlock <= 0) return 0;
+
+  const midValue = Math.max(...midAlternatives.map(card => card.value));
+  const midAnswerProbability = probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, midValue);
+  const highAnswerProbability = probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, cardsToPlay[0].value);
+  const extraForceProbability = Math.max(0, midAnswerProbability - highAnswerProbability);
+
+  // Charge for spending a King or Ace when a mid card blocks low answers just
+  // as effectively. Waive that cost when the higher rank materially increases
+  // the chance of forcing a pickup, especially against a near-finished player.
+  const basePenalty = cardsToPlay[0].value === 14 ? 110 : 78;
+  const handReserve = hand.length >= 7 ? 1.15 : 1;
+  const urgencyDiscount = nextPlayer.hand.length <= 2 ? 0.55 : 1;
+  return basePenalty * handReserve * urgencyDiscount * (1 - extraForceProbability);
 }
 
 function getTrainingMoveKey(candidate: any): string {
@@ -1354,6 +1391,68 @@ function candidateKey(candidate: AIMove): string {
   return `${candidate.type}:${candidate.takeType ?? ''}`;
 }
 
+function getActionKeysForHistoryMove(move: PlayerMove, pileBefore: Card[], options: GameOptions): string[] {
+  if (move.type === 'play') {
+    return [`play:${move.cards.map(card => card.id).sort().join(',')}`];
+  }
+
+  const takeOptions = getTakeOptions(pileBefore, options);
+  const keys: string[] = [];
+  if (takeOptions.canTake3 && move.cards.length === takeOptions.take3Count) keys.push('take:take3');
+  if (takeOptions.canTakeAll && move.cards.length === takeOptions.takeAllCount) keys.push('take:takeAll');
+  return keys;
+}
+
+function getPreviousActionAtRepeatedPosition(state: GameState, playerId: number): string[] {
+  const player = state.players.find(candidate => candidate.id === playerId);
+  if (!player || state.moveHistory.length < 3 || state.moveHistory[0]?.turnNumber !== 0) return [];
+
+  let historicalPile = [...state.pile];
+  let historicalHand = [...player.hand];
+  const historicalHandCounts = state.players.map(candidate => candidate.hand.length);
+  const targetHand = player.hand.map(card => card.id).sort().join(',');
+  const targetPile = state.pile.map(card => card.id).join(',');
+
+  // Rewind the public move history while reconstructing only this AI's hand.
+  // This identifies an exact earlier decision position without reading any
+  // opponent's hidden hand.
+  for (let index = state.moveHistory.length - 1; index >= 0; index--) {
+    const move = state.moveHistory[index];
+    if (move.type === 'play') {
+      const playedIds = new Set(move.cards.map(card => card.id));
+      historicalPile = historicalPile.filter((card, cardIndex) =>
+        cardIndex < historicalPile.length - move.cards.length || !playedIds.has(card.id),
+      );
+      if (move.playerId === playerId) historicalHand = [...historicalHand, ...move.cards];
+      historicalHandCounts[move.playerId] += move.cards.length;
+    } else {
+      if (move.playerId === playerId) {
+        const takenIds = new Set(move.cards.map(card => card.id));
+        historicalHand = historicalHand.filter(card => !takenIds.has(card.id));
+      }
+      historicalHandCounts[move.playerId] -= move.cards.length;
+      historicalPile = [...historicalPile, ...move.cards];
+    }
+
+    const actedOnSamePosition = move.playerId === playerId &&
+      historicalHand.map(card => card.id).sort().join(',') === targetHand &&
+      historicalPile.map(card => card.id).join(',') === targetPile &&
+      historicalHandCounts.every((count, playerIndex) => count === state.players[playerIndex].hand.length);
+    if (!actedOnSamePosition) continue;
+
+    const previousMove = state.moveHistory[index - 1];
+    const wasBonusTurn = previousMove?.playerId === playerId && previousMove.type === 'play' && (
+      (state.options.fourOfAKindRule && previousMove.cards.length === 4) ||
+      (state.options.specialNinesRule && previousMove.cards.length === 3 && previousMove.cards.every(card => card.value === 9))
+    );
+    if (wasBonusTurn !== state.canContinueTurn) continue;
+
+    return getActionKeysForHistoryMove(move, historicalPile, state.options);
+  }
+
+  return [];
+}
+
 function applyRolloutCandidate(state: GameState, playerId: number, candidate: AIMove): GameState | null {
   if (candidate.type === 'play') {
     const isFirstMove = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
@@ -1408,11 +1507,11 @@ function getSearchHandStrength(hand: Card[]): number {
   const earlyGame = hand.length >= 7;
   for (const card of hand) {
     counts.set(card.value, (counts.get(card.value) ?? 0) + 1);
-    // Kings and Aces are useful control cards, but their value stays small
-    // beside the cost of carrying another card in a shedding game.
+    // Keep enough value on Kings and Aces that the search spends a Jack or
+    // Queen to block low cards first. Their reserve value falls in the endgame.
     score += (card.value - 9) * 3;
-    if (card.value === 13) score += earlyGame ? 22 : 12;
-    if (card.value === 14) score += earlyGame ? 28 : 16;
+    if (card.value === 13) score += earlyGame ? 34 : 18;
+    if (card.value === 14) score += earlyGame ? 46 : 25;
   }
   for (const count of counts.values()) {
     if (count >= 2) score += 3;
@@ -1624,14 +1723,12 @@ function getHardAIMove(state: GameState, playerId: number, searchFuture = true):
     return fallback;
   }
 
-  const preferredCandidates = searchFuture
-    ? candidates
-    : candidates.filter(candidate =>
-        candidate.type !== 'play' || (
-          !isUnnecessaryAceOnOpening(candidate.cards, hand, pile) &&
-          shouldUseFourOfAKind(candidate.cards, hand, state, playerId)
-        )
-      );
+  const preferredCandidates = candidates.filter(candidate =>
+    candidate.type !== 'play' || (
+      !isUnnecessaryAceOnOpening(candidate.cards, hand, pile) &&
+      shouldUseFourOfAKind(candidate.cards, hand, state, playerId)
+    )
+  );
   const candidatesToScore = preferredCandidates.length > 0 ? preferredCandidates : candidates;
   const demonstrationScores = getHumanDemonstrationScores(state, playerId, candidatesToScore);
   const baseScored = candidatesToScore.map(c => {
@@ -1664,14 +1761,22 @@ function getHardAIMove(state: GameState, playerId: number, searchFuture = true):
   // preserving quad and immediate-win lines even if their static estimate is
   // temporarily understated. Larger tables use a wider search below.
   const rankedCandidates = [...baseScored].sort((a, b) => b.score - a.score);
+  const repeatedActionKeys = getPreviousActionAtRepeatedPosition(state, playerId);
+  const blockingTracker = buildOpponentCardTracker(state, playerId);
   const searchEstimates = searchFuture
     ? adversarialSearchEstimates(state, playerId, rankedCandidates.map(entry => entry.c))
     : new Map<string, number>();
   const scored = baseScored.map(entry => {
     // The adversarial search is the primary signal; demonstrated human choices
     // and tactical scoring break near-equal leaf evaluations.
-    const futureScore = searchEstimates.get(candidateKey(entry.c));
-    return { ...entry, score: (futureScore ?? 0) + entry.score * 0.2 };
+    const key = candidateKey(entry.c);
+    const futureScore = searchEstimates.get(key);
+    const isImmediateWin = entry.c.type === 'play' && entry.c.cards.length === hand.length;
+    const cyclePenalty = !isImmediateWin && repeatedActionKeys.includes(key) ? 1000 : 0;
+    const highCardBlockPenalty = entry.c.type === 'play'
+      ? getHighCardBlockingPenalty(entry.c.cards, hand, pile, state, playerId, blockingTracker)
+      : 0;
+    return { ...entry, score: (futureScore ?? 0) + entry.score * 0.2 - cyclePenalty - highCardBlockPenalty };
   });
   scored.sort((a, b) => b.score - a.score);
 
