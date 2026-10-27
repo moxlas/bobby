@@ -350,6 +350,73 @@ function probabilityAnyOpponentHasValue(tracker: OpponentCardTracker, state: Gam
   return 1 - probabilityNoOpponentHasValue;
 }
 
+function estimateOpponentCardsAtRank(
+  tracker: OpponentCardTracker,
+  state: GameState,
+  opponentId: number,
+  value: number,
+) {
+  const opponent = state.players.find(player => player.id === opponentId);
+  if (!opponent || opponent.hasFinished) return 0;
+
+  const knownCount = (tracker.knownHands.get(opponentId) ?? [])
+    .filter(card => card.value === value).length;
+  const unknownRankCount = Math.max(0, tracker.unknownCounts.get(value) ?? 0);
+  if (state.players.length === 2) return knownCount + unknownRankCount;
+
+  const unknownSlots = Math.max(0, opponent.hand.length - (tracker.knownHands.get(opponentId)?.length ?? 0));
+  const ceiling = tracker.unknownValueCeilings.get(opponentId);
+  if (unknownSlots === 0 || (ceiling !== undefined && value >= ceiling)) return knownCount;
+
+  let eligibleUnknownCards = 0;
+  for (let rank = 9; rank <= 14; rank++) {
+    if (ceiling !== undefined && rank >= ceiling) continue;
+    eligibleUnknownCards += Math.max(0, tracker.unknownCounts.get(rank) ?? 0);
+  }
+  if (eligibleUnknownCards === 0) return knownCount;
+
+  return knownCount + unknownSlots * unknownRankCount / eligibleUnknownCards;
+}
+
+function evaluateLowCardBlock(
+  cardToPlay: Card,
+  hand: Card[],
+  pile: Card[],
+  state: GameState,
+  playerId: number,
+  tracker: OpponentCardTracker,
+) {
+  const topValue = pile[pile.length - 1]?.value ?? 9;
+  if (cardToPlay.value <= topValue) return 0;
+
+  const playerIndex = state.players.findIndex(player => player.id === playerId);
+  const nextPlayer = state.players[getNextPlayerIndex(playerIndex, state.players)];
+  if (!nextPlayer || nextPlayer.hasFinished) return 0;
+
+  // A mid-rank play can make several of the next player's cheapest answers
+  // unusable at once. Count those blocked cards from public history, and use
+  // a probability-weighted estimate when more than two players are active.
+  let blockedCards = 0;
+  for (let rank = Math.max(9, topValue); rank < cardToPlay.value; rank++) {
+    const rankWeight = rank === 9 ? 1.2 : rank === 10 ? 1.15 : rank === 11 ? 1.05 : 1;
+    blockedCards += estimateOpponentCardsAtRank(tracker, state, nextPlayer.id, rank) * rankWeight;
+  }
+  if (blockedCards <= 0) return 0;
+
+  const hasLegalMidCard = hand.some(card => card.value >= topValue && card.value >= 11 && card.value <= 12);
+  // Prefer Jacks and Queens to do the blocking. Kings and Aces receive less
+  // credit when a mid card can deny the same low-card routes.
+  const rankEfficiency = cardToPlay.value <= 12
+    ? 1.1
+    : cardToPlay.value === 13
+      ? (hasLegalMidCard ? 0.55 : 0.82)
+      : (hasLegalMidCard ? 0.32 : 0.62);
+  const closeOpponentMultiplier = nextPlayer.hand.length <= 2 ? 1.25 : 1;
+  const evenRaceMultiplier = Math.abs(hand.length - nextPlayer.hand.length) <= 2 ? 1.1 : 1;
+
+  return Math.min(64, blockedCards * 20) * rankEfficiency * closeOpponentMultiplier * evenRaceMultiplier;
+}
+
 function getTrainingMoveKey(candidate: any): string {
   if (candidate.type === 'play') {
     const values = candidate.cards.map((card: Card) => card.value).sort((a: number, b: number) => a - b);
@@ -1135,6 +1202,8 @@ function evaluateCandidate(state: GameState, playerId: number, candidate: any) {
     }
 
     if (candidate.cards.length === 1) {
+      score += evaluateLowCardBlock(candidate.cards[0], hand, pile, state, playerId, tracker);
+
       const higherRankCounts = new Map<number, number>();
       for (const card of hand) {
         if (card.value > playedValue) higherRankCounts.set(card.value, (higherRankCounts.get(card.value) ?? 0) + 1);
@@ -1353,6 +1422,14 @@ function getSearchHandStrength(hand: Card[]): number {
   return score;
 }
 
+function getSearchBlockedCardValue(hand: Card[], pileTop: number): number {
+  return hand.reduce((score, card) => {
+    if (card.value >= pileTop) return score;
+    const blockedValue = card.value === 9 ? 8 : card.value === 10 ? 7 : card.value === 11 ? 6 : card.value === 12 ? 4 : 2;
+    return score + blockedValue;
+  }, 0);
+}
+
 function evaluateSearchPosition(state: GameState, rootPlayerId: number): number {
   const root = state.players.find(player => player.id === rootPlayerId);
   if (!root) return -100000;
@@ -1360,6 +1437,22 @@ function evaluateSearchPosition(state: GameState, rootPlayerId: number): number 
   const opponents = state.players.filter(player => player.id !== rootPlayerId && !player.hasFinished);
   const strongestOpponent = Math.max(-100000, ...opponents.map(opponent => getSearchHandStrength(opponent.hand)));
   let score = rootStrength - strongestOpponent;
+
+  // Raising the pile can deny an opponent several of their cheapest cards at
+  // once. Preserve that tempo value in the search leaves, while charging the
+  // root a smaller cost for its own low cards becoming temporarily stranded.
+  // The asymmetry reflects the race: making the next opponent spend a higher
+  // answer can be worth carrying a low card until the pile drops again.
+  if (opponents.length > 0) {
+    const pileTop = state.pile[state.pile.length - 1]?.value ?? 9;
+    const rootIndex = state.players.findIndex(player => player.id === rootPlayerId);
+    const nextOpponent = state.players[getNextPlayerIndex(rootIndex, state.players)];
+    const nextOpponentBlocked = nextOpponent && !nextOpponent.hasFinished
+      ? getSearchBlockedCardValue(nextOpponent.hand, pileTop)
+      : 0;
+    const ownBlockedCards = getSearchBlockedCardValue(root.hand, pileTop);
+    score += nextOpponentBlocked * 7 - ownBlockedCards * 3;
+  }
 
   // Leaving an opponent with one or two cards creates a concrete near-term
   // threat; retaining a similar lead for the AI is correspondingly valuable.
