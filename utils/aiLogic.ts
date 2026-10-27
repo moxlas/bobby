@@ -1,10 +1,24 @@
 import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
 import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
 import { getNextPlayerIndex, getTakeOptions, validatePlay, playCards, takeCards, endTurn } from './gameLogic';
-import { getDemonstratedHighPileTakeRate, getDemonstratedPickupAdjustment, getDemonstratedPickupRate, getDemonstratedQuadBreakShare, getDemonstratedQuadCompletionTakeRate } from './humanMoveTraining';
+import { HUMAN_MOVE_TRAINING, getDemonstratedHighPileTakeRate, getDemonstratedPickupAdjustment, getDemonstratedQuadBreakShare } from './humanMoveTraining';
 import { HUMAN_MOVE_TRAINING_EXAMPLES } from './humanMoveTrainingData';
 
 export type AIMove = { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' };
+
+// Read these smoothed rates from the compiled statistics directly so Hard AI
+// remains build-compatible with training files generated before these helpers
+// were exported from the training module.
+function getDemonstratedPickupRate(topValue: number): number {
+  const topKey = String(topValue) as keyof typeof HUMAN_MOVE_TRAINING.pileTopChoices;
+  const observations = HUMAN_MOVE_TRAINING.pileTopChoices[topKey];
+  return observations ? (observations.takes + 2) / (observations.states + 8) : 0.25;
+}
+
+function getDemonstratedQuadCompletionTakeRate(value: 13 | 14): number {
+  const observations = HUMAN_MOVE_TRAINING.quadChoices.quadCompletionTakeStats[value];
+  return (observations.takes + 1) / (observations.opportunities + 2);
+}
 
 // ============================================================
 // AI logic — updated to guarantee AI never skips a turn.
