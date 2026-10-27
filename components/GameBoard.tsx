@@ -446,15 +446,46 @@ export function GameBoard({
       }
     };
 
-    const getQuickMove = (state: any, player: any) => {
+    const normalizeAIMove = (state: any, player: any, aiMove: any, preferPlayOnContinuation = false) => {
+      const candidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
+      const legalPlay = (move: any) => move?.type === 'play' && move.cards?.length > 0 &&
+        validatePlay(
+          move.cards,
+          state.pile,
+          state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds',
+          state.options,
+        ).valid;
+      const legalTake = (move: any) => move?.type === 'take' && candidates.some(candidate =>
+        candidate.type === 'take' && candidate.takeType === move.takeType,
+      );
+
+      const firstPlay = candidates.find(candidate => candidate.type === 'play');
+      const firstTake = candidates.find(candidate => candidate.type === 'take');
+
+      if (state.canContinueTurn) {
+        if (legalPlay(aiMove)) return aiMove;
+        if (aiMove?.type === 'endTurn' && !preferPlayOnContinuation) return aiMove;
+        // A timed-out bonus turn should still use a legal play when one exists.
+        return firstPlay ?? { type: 'endTurn', cards: [] };
+      }
+
+      // Outside a bonus turn, endTurn is never a legal substitute for a play
+      // or pickup. Keep strategic take choices when they are available.
+      if (legalPlay(aiMove)) return aiMove;
+      if (legalTake(aiMove)) return aiMove;
+      return firstPlay ?? firstTake ?? { type: 'endTurn', cards: [] };
+    };
+
+    const getQuickMove = (state: any, player: any, preferPlayOnContinuation = false) => {
+      let aiMove: any = null;
       try {
-        return state.canContinueTurn
+        aiMove = state.canContinueTurn
           ? getContinueTurnMove(player.hand, state.pile, state.options.aiDifficulty, state.options, state, player.id, false)
           : getAIMove(state, player.id, false);
       } catch (error) {
-        console.error('AI move calculation failed; ending this turn safely.', error);
-        return { type: 'endTurn', cards: [] };
+        console.error('AI move calculation failed; selecting a legal fallback action.', error);
       }
+      return normalizeAIMove(state, player, aiMove, preferPlayOnContinuation);
     };
 
     const executeAITurn = () => {
@@ -476,7 +507,7 @@ export function GameBoard({
         if (searchTimeout) clearTimeout(searchTimeout);
         worker?.terminate();
         worker = null;
-        commitAITurn(state, player, aiMove);
+        commitAITurn(state, player, normalizeAIMove(state, player, aiMove));
       };
 
       if (state.options.aiDifficulty !== 'hard') {
@@ -489,16 +520,16 @@ export function GameBoard({
         worker.onmessage = event => resolveMove(event.data);
         worker.onerror = event => {
           event.preventDefault();
-          resolveMove(getQuickMove(state, player));
+          resolveMove(getQuickMove(state, player, true));
         };
         worker.postMessage({ state, playerId: player.id });
         searchTimeout = setTimeout(() => {
           worker?.terminate();
-          resolveMove(getQuickMove(state, player));
+          resolveMove(getQuickMove(state, player, true));
         }, 3000);
       } catch (error) {
         console.error('Could not start the AI search worker; using a quick move.', error);
-        resolveMove(getQuickMove(state, player));
+        resolveMove(getQuickMove(state, player, true));
       }
     };
 
