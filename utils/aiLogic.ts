@@ -1684,7 +1684,7 @@ function evaluateTakeMove(takeCount: number, hand: Card[], pile: Card[], state: 
 // -----------------------------
 // Main AI entrypoint
 // -----------------------------
-export function getAIMove(state: GameState, playerId: number): AIMove {
+export function getAIMove(state: GameState, playerId: number, searchFuture = true): AIMove {
   const player = state.players.find(p => p.id === playerId);
   if (!player) return { type: 'endTurn', cards: [] };
 
@@ -1704,7 +1704,7 @@ export function getAIMove(state: GameState, playerId: number): AIMove {
   if (difficulty === 'easy') return getEasyAIMove(player.hand, state.pile, options);
   if (difficulty === 'medium') return getMediumAIMove(state, playerId);
 
-  const move = getHardAIMove(state, playerId);
+  const move = getHardAIMove(state, playerId, searchFuture);
 
   // Check for the specific scenario with only 9♦ on pile
   if (
@@ -1786,7 +1786,8 @@ export function getContinueTurnMove(
   difficulty: AIDifficulty,
   options: GameOptions,
   state: GameState,
-  playerId: number
+  playerId: number,
+  searchFuture = true
 ): { type: 'play' | 'endTurn'; cards: Card[] } {
   const topCard = pile[pile.length - 1];
   const isFirstMove = pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds';
@@ -1806,7 +1807,7 @@ export function getContinueTurnMove(
 
   if (difficulty === 'hard') {
     const hardState = { ...state, canContinueTurn: true };
-    const searchedMove = getHardAIMove(hardState, playerId);
+    const searchedMove = getHardAIMove(hardState, playerId, searchFuture);
     return searchedMove.type === 'play'
       ? { type: 'play', cards: searchedMove.cards }
       : { type: 'endTurn', cards: [] };
