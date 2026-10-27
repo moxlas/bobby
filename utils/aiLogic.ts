@@ -1507,9 +1507,20 @@ function getHardAIMove(state: GameState, playerId: number, searchFuture = true):
 
   // The full legal-action list is used for the ten-decision search. The older
   // compact generator remains available to the no-search fallback.
-  const candidates = searchFuture
+  const generatedCandidates = searchFuture
     ? getAIMoveCandidates(state, playerId, state.canContinueTurn)
     : generateCandidates(state, playerId);
+  // A four-of-a-kind continuation can be ended, but it cannot be used to pick
+  // up cards. The compact timeout policy must not turn a take choice into an
+  // accidental end turn.
+  const candidates = state.canContinueTurn
+    ? [
+        ...generatedCandidates.filter(candidate => candidate.type !== 'take'),
+        ...(generatedCandidates.some(candidate => candidate.type === 'endTurn')
+          ? []
+          : [{ type: 'endTurn' as const, cards: [] }]),
+      ]
+    : generatedCandidates;
   if (!candidates || candidates.length === 0) {
     const takeOpts = getTakeOptions(pile, options);
     if (takeOpts.canTake3) return returnTakeMove('take3');
@@ -1545,10 +1556,12 @@ function getHardAIMove(state: GameState, playerId: number, searchFuture = true):
           if (bestFollowUp > 0) strategicScore += bestFollowUp * 0.25;
         }
       }
-    } else {
+    } else if (c.type === 'take') {
       const takeOptions = getTakeOptions(pile, options);
       const takeCount = c.takeType === 'takeAll' ? takeOptions.takeAllCount : takeOptions.take3Count;
       strategicScore = evaluateTakeMove(takeCount, hand, pile, state, playerId);
+    } else {
+      strategicScore = -10;
     }
 
     const humanDemonstrationScore = demonstrationScores.get(getTrainingMoveKey(c)) ?? 0;
