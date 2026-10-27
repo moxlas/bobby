@@ -370,6 +370,93 @@ export function GameBoard({
 
     setIsAIThinking(true);
 
+    let cancelled = false;
+    let worker: Worker | null = null;
+    let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+    let moveResolved = false;
+
+    const commitAITurn = (state: any, player: any, aiMove: any) => {
+      if (cancelled) return;
+      const latestState = gameStateRef.current;
+      const latestPlayer = latestState.players[latestState.currentPlayerIndex];
+      if (
+        latestState.phase !== 'playing' ||
+        latestPlayer?.id !== player.id ||
+        latestState.canContinueTurn !== state.canContinueTurn
+      ) {
+        setIsAIThinking(false);
+        return;
+      }
+
+      try {
+        let executedMove: AIFeedbackMove = { type: 'endTurn', cards: [] };
+
+        if (aiMove.type === 'endTurn') {
+          onEndTurnRef.current();
+        } else if (aiMove.type === 'play' && aiMove.cards.length > 0) {
+          const pile = state.pile;
+          const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
+          const validation = validatePlay(aiMove.cards, pile, isFirstMove, state.options);
+
+          if (validation.valid) {
+            executedMove = { type: 'play', cards: aiMove.cards.map((card: CardType) => ({ ...card })) };
+            onPlayCardsRef.current(player.id, aiMove.cards, validation.continueTurn || false);
+          } else {
+            const takeOpts = getTakeOptions(pile, state.options);
+            const count = takeOpts.canTake3 ? takeOpts.take3Count : takeOpts.takeAllCount;
+            if (count > 0) {
+              executedMove = { type: 'take', cards: [], takeType: takeOpts.canTake3 ? 'take3' : 'takeAll' };
+              onTakeCardsRef.current(player.id, count);
+            } else {
+              onPlayCardsRef.current(player.id, [], false);
+            }
+          }
+        } else if (aiMove.type === 'take') {
+          const takeOpts = getTakeOptions(state.pile, state.options);
+          const count = aiMove.takeType === 'takeAll' ? takeOpts.takeAllCount : takeOpts.take3Count;
+          if (count > 0) {
+            executedMove = { type: 'take', cards: [], takeType: aiMove.takeType };
+            onTakeCardsRef.current(player.id, count);
+          } else {
+            onPlayCardsRef.current(player.id, [], false);
+          }
+        } else {
+          onPlayCardsRef.current(player.id, [], false);
+        }
+
+        if (state.options.aiEvaluationEnabled) {
+          const feedbackCandidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
+          if (feedbackCandidates.some(candidate => candidate.type === 'play')) {
+            setFeedbackMode('rating');
+            setFeedbackError(null);
+            setFeedbackHidden(false);
+            setShowAICardsDuringFeedback(false);
+            setPendingAIFeedback({
+              stateBeforeMove: state,
+              playerId: player.id,
+              chosenMove: executedMove,
+              candidates: feedbackCandidates,
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Could not apply the AI move.', error);
+      } finally {
+        setIsAIThinking(false);
+      }
+    };
+
+    const getQuickMove = (state: any, player: any) => {
+      try {
+        return state.canContinueTurn
+          ? getContinueTurnMove(player.hand, state.pile, state.options.aiDifficulty, state.options, state, player.id, false)
+          : getAIMove(state, player.id, false);
+      } catch (error) {
+        console.error('AI move calculation failed; ending this turn safely.', error);
+        return { type: 'endTurn', cards: [] };
+      }
+    };
+
     const executeAITurn = () => {
       const state = gameStateRef.current;
       if (state.phase !== 'playing') {
@@ -378,81 +465,51 @@ export function GameBoard({
       }
 
       const player = state.players[state.currentPlayerIndex];
-
       if (!player || !player.isAI || player.hasFinished) {
         setIsAIThinking(false);
         return;
       }
 
-      const aiMove = state.canContinueTurn
-        ? getContinueTurnMove(player.hand, state.pile, state.options.aiDifficulty, state.options, state, player.id)
-        : getAIMove(state, player.id);
-      let executedMove: AIFeedbackMove = { type: 'endTurn', cards: [] };
+      const resolveMove = (aiMove: any) => {
+        if (cancelled || moveResolved) return;
+        moveResolved = true;
+        if (searchTimeout) clearTimeout(searchTimeout);
+        worker?.terminate();
+        worker = null;
+        commitAITurn(state, player, aiMove);
+      };
 
-      if (aiMove.type === 'endTurn') {
-        executedMove = { type: 'endTurn', cards: [] };
-        onEndTurnRef.current();
-      } else if (aiMove.type === 'play' && aiMove.cards.length > 0) {
-        const pile = state.pile;
-        const isFirstMove = pile.length === 1 && pile[0].suit === 'diamonds' && pile[0].value === 9;
-        const validation = validatePlay(aiMove.cards, pile, isFirstMove, state.options);
-
-        if (validation.valid) {
-          executedMove = { type: 'play', cards: aiMove.cards.map((card: CardType) => ({ ...card })) };
-          onPlayCardsRef.current(player.id, aiMove.cards, validation.continueTurn || false);
-        } else {
-          const takeOpts = getTakeOptions(pile, state.options);
-          const count = takeOpts.canTake3 ? takeOpts.take3Count : takeOpts.takeAllCount;
-          if (count > 0) {
-            executedMove = { type: 'take', cards: [], takeType: takeOpts.canTake3 ? 'take3' : 'takeAll' };
-            onTakeCardsRef.current(player.id, count);
-          } else {
-            executedMove = { type: 'endTurn', cards: [] };
-            onPlayCardsRef.current(player.id, [], false);
-          }
-        }
-      } else if (aiMove.type === 'take') {
-        const takeOpts = getTakeOptions(state.pile, state.options);
-        const count = aiMove.takeType === 'takeAll'
-          ? takeOpts.takeAllCount
-          : takeOpts.take3Count;
-
-        if (count > 0) {
-          executedMove = { type: 'take', cards: [], takeType: aiMove.takeType };
-          onTakeCardsRef.current(player.id, count);
-        } else {
-          executedMove = { type: 'endTurn', cards: [] };
-          onPlayCardsRef.current(player.id, [], false);
-        }
-      } else {
-        executedMove = { type: 'endTurn', cards: [] };
-        onPlayCardsRef.current(player.id, [], false);
+      if (state.options.aiDifficulty !== 'hard') {
+        resolveMove(getQuickMove(state, player));
+        return;
       }
 
-      if (state.options.aiEvaluationEnabled) {
-        const feedbackCandidates = getAIMoveCandidates(state, player.id, state.canContinueTurn);
-        const hadMoveChoice = feedbackCandidates.some(candidate => candidate.type === 'play');
-        if (hadMoveChoice) {
-          setFeedbackMode('rating');
-          setFeedbackError(null);
-          setFeedbackHidden(false);
-          setShowAICardsDuringFeedback(false);
-          setPendingAIFeedback({
-            stateBeforeMove: state,
-            playerId: player.id,
-            chosenMove: executedMove,
-            candidates: feedbackCandidates,
-          });
-        }
+      try {
+        worker = new Worker(new URL('../utils/aiWorker.ts', import.meta.url), { type: 'module' });
+        worker.onmessage = event => resolveMove(event.data);
+        worker.onerror = event => {
+          event.preventDefault();
+          resolveMove(getQuickMove(state, player));
+        };
+        worker.postMessage({ state, playerId: player.id });
+        searchTimeout = setTimeout(() => {
+          worker?.terminate();
+          resolveMove(getQuickMove(state, player));
+        }, 3000);
+      } catch (error) {
+        console.error('Could not start the AI search worker; using a quick move.', error);
+        resolveMove(getQuickMove(state, player));
       }
-      setIsAIThinking(false);
     };
 
     const delay = getAIDelay(gameState.options.aiDifficulty);
     const timeout = setTimeout(executeAITurn, delay);
 
     return () => {
+      cancelled = true;
       clearTimeout(timeout);
+      if (searchTimeout) clearTimeout(searchTimeout);
+      worker?.terminate();
       setIsAIThinking(false);
     };
   }, [gameState.currentPlayerIndex, gameState.phase, gameState.players, gameState.canContinueTurn, pendingAIFeedback]);
