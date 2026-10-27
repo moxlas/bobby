@@ -1,7 +1,7 @@
 import { Card, GameState, GameOptions, AIDifficulty, Player } from '../types/game';
 import { getCardsOfSameValue, hasFourOfSameValue, sortHand } from './deckUtils';
 import { getNextPlayerIndex, getTakeOptions, validatePlay, playCards, takeCards, endTurn } from './gameLogic';
-import { getDemonstratedHighPileTakeRate, getDemonstratedPickupAdjustment, getDemonstratedPickupRate, getDemonstratedQuadBreakShare } from './humanMoveTraining';
+import { getDemonstratedHighPileTakeRate, getDemonstratedPickupAdjustment, getDemonstratedQuadBreakShare } from './humanMoveTraining';
 import { HUMAN_MOVE_TRAINING_EXAMPLES } from './humanMoveTrainingData';
 
 export type AIMove = { type: 'play' | 'take' | 'endTurn'; cards: Card[]; takeType?: 'take3' | 'takeAll' };
@@ -266,53 +266,6 @@ function probabilityOpponentHasValue(tracker: OpponentCardTracker, state: GameSt
   return 1 - probabilityNoMatch;
 }
 
-function combination(n: number, k: number) {
-  if (k < 0 || k > n) return 0;
-  let result = 1;
-  for (let index = 1; index <= Math.min(k, n - k); index++) {
-    result = result * (n - index + 1) / index;
-  }
-  return result;
-}
-
-function probabilityOpponentHasAtLeast(
-  tracker: OpponentCardTracker,
-  state: GameState,
-  opponentId: number,
-  value: number,
-  minimumCount: number,
-) {
-  const opponent = state.players.find(player => player.id === opponentId);
-  if (!opponent || opponent.hasFinished) return 0;
-  const knownCards = tracker.knownHands.get(opponentId) ?? [];
-  const knownCount = knownCards.filter(card => card.value === value).length;
-  if (knownCount >= minimumCount) return 1;
-
-  const unknownSlots = Math.max(0, opponent.hand.length - knownCards.length);
-  const needed = minimumCount - knownCount;
-  if (unknownSlots < needed) return 0;
-
-  const ceiling = tracker.unknownValueCeilings.get(opponentId);
-  let totalUnknown = 0;
-  for (let candidateValue = 9; candidateValue <= 14; candidateValue++) {
-    if (ceiling !== undefined && candidateValue >= ceiling) continue;
-    totalUnknown += Math.max(0, tracker.unknownCounts.get(candidateValue) ?? 0);
-  }
-  const matchingUnknown = ceiling !== undefined && value >= ceiling
-    ? 0
-    : Math.max(0, tracker.unknownCounts.get(value) ?? 0);
-  if (totalUnknown < unknownSlots || matchingUnknown < needed) return 0;
-
-  const denominator = combination(totalUnknown, unknownSlots);
-  if (denominator === 0) return 0;
-  let probability = 0;
-  for (let matching = needed; matching <= Math.min(matchingUnknown, unknownSlots); matching++) {
-    probability += combination(matchingUnknown, matching) *
-      combination(totalUnknown - matchingUnknown, unknownSlots - matching) / denominator;
-  }
-  return Math.min(1, probability);
-}
-
 function probabilityAnyOpponentHasValue(tracker: OpponentCardTracker, state: GameState, playerId: number, value: number) {
   let probabilityNoOpponentHasValue = 1;
   for (const opponent of state.players) {
@@ -352,14 +305,7 @@ function getLastOpponentContext(state: GameState, playerId: number) {
   return { lastOpponentAction, lastOpponentTop };
 }
 
-export type HumanImitationStyle = 'weighted' | 'nearest' | 'consensus';
-
-function getHumanDemonstrationScores(
-  state: GameState,
-  playerId: number,
-  candidates: AIMove[],
-  style: HumanImitationStyle = 'weighted',
-): Map<string, number> {
+function getHumanDemonstrationScores(state: GameState, playerId: number, candidates: AIMove[]): Map<string, number> {
   const scores = new Map(candidates.map(candidate => [getTrainingMoveKey(candidate), 0]));
   // The compiled demonstrations all use two players and all three rules.
   // Keep the learned preference out of unsupported table/rule configurations.
@@ -384,8 +330,6 @@ function getHumanDemonstrationScores(
     .sort((a, b) => a - b);
   const openingPile = state.pile.length === 1 && state.pile[0].value === 9 && state.pile[0].suit === 'diamonds';
   const lastOpponentContext = getLastOpponentContext(state, playerId);
-  const neighborCount = style === 'nearest' ? 1 : style === 'consensus' ? 25 : 10;
-  const temperature = style === 'consensus' ? 2.5 : 1.5;
   const neighbors = HUMAN_MOVE_TRAINING_EXAMPLES.map(example => {
     let distance = 0;
     for (let index = 0; index < 6; index++) {
@@ -406,21 +350,15 @@ function getHumanDemonstrationScores(
     if (state.canContinueTurn !== example.canContinue) distance += 1;
     if (openingPile !== example.openingPile) distance += 1;
     return { example, distance };
-  }).sort((a, b) => a.distance - b.distance).slice(0, neighborCount);
-
-  if (style === 'nearest' && (neighbors[0]?.distance ?? Infinity) > 2.5) return scores;
+  }).sort((a, b) => a.distance - b.distance).slice(0, 10);
 
   const weightedPreferences = new Map([...scores.keys()].map(key => [key, { preference: 0, weight: 0 }]));
   for (const { example, distance } of neighbors) {
-    const weight = Math.exp(-distance / temperature);
+    const weight = Math.exp(-distance / 1.5);
     for (const [moveKey, totals] of weightedPreferences) {
       if (!example.available.includes(moveKey)) continue;
       totals.weight += weight;
-      if (style === 'consensus') {
-        if (example.chosen === moveKey) totals.preference += weight;
-      } else {
-        totals.preference += weight * (example.chosen === moveKey ? 1 : -0.25);
-      }
+      totals.preference += weight * (example.chosen === moveKey ? 1 : -0.25);
     }
   }
 
@@ -428,11 +366,15 @@ function getHumanDemonstrationScores(
   // is below 70%, so keep its influence bounded and let tactical scoring lead.
   for (const [moveKey, totals] of weightedPreferences) {
     if (totals.weight === 0) continue;
-    const confidence = 1 - Math.exp(-totals.weight / (style === 'consensus' ? 3 : 1.5));
+    const confidence = 1 - Math.exp(-totals.weight / 1.5);
     const preference = totals.preference / totals.weight;
     scores.set(moveKey, Math.max(-24, Math.min(32, preference * 32 * confidence)));
   }
   return scores;
+}
+
+function getHumanDemonstrationScore(state: GameState, playerId: number, candidate: AIMove): number {
+  return getHumanDemonstrationScores(state, playerId, [candidate]).get(getTrainingMoveKey(candidate)) ?? 0;
 }
 
 // -----------------------------
@@ -702,114 +644,103 @@ function evaluateHighCardControl(
   playerId: number,
   tracker = buildOpponentCardTracker(state, playerId),
 ) {
-  if (cardsToPlay.length === 0) return 0;
-  const isHighSingle = cardsToPlay.length === 1 && cardsToPlay[0].value >= 13;
+  if (cardsToPlay.length !== 1 || cardsToPlay[0].value < 13) return 0;
   const playedValue = cardsToPlay[0].value;
   const remainingHand = hand.filter(card => card.id !== cardsToPlay[0].id);
   if (remainingHand.length === 0) return 0;
 
   const topValue = pile[pile.length - 1]?.value ?? 9;
+  const highCardsBefore = hand.filter(card => card.value >= 13).length;
+  const highCardsAfter = remainingHand.filter(card => card.value >= 13).length;
+  const lowerLegalAlternative = hand.some(card => card.value >= topValue && card.value < playedValue);
   const opponentInfo = estimateOpponentStrength(state, playerId);
   let score = 0;
 
-  if (isHighSingle) {
-    const highCardsBefore = hand.filter(card => card.value >= 13).length;
-    const highCardsAfter = remainingHand.filter(card => card.value >= 13).length;
-    const lowerLegalAlternative = hand.some(card => card.value >= topValue && card.value < playedValue);
+  // In the combined human data, all 91 high singles played while a lower
+  // legal answer existed still left a King or Ace in hand. Preserve the last
+  // high control card unless the pile makes it a necessary response or it
+  // blocks an opponent who is close to finishing.
+  if (highCardsBefore === 1 && highCardsAfter === 0) {
+    const reserveCost = lowerLegalAlternative
+      ? (remainingHand.length <= 3 ? 135 : 110)
+      : topValue >= 14 ? 22 : topValue >= 13 ? 38 : 72;
+    score -= opponentInfo.opponentCloseToWin ? reserveCost * 0.3 : reserveCost;
+  }
 
-    // In the combined expert data, every high single played with a lower legal
-    // answer kept another King or Ace. Preserve the last control card unless
-    // this is a necessary response or an urgent block.
-    if (highCardsBefore === 1 && highCardsAfter === 0) {
-      const reserveCost = lowerLegalAlternative
-        ? (remainingHand.length <= 3 ? 135 : 110)
-        : topValue >= 14 ? 22 : topValue >= 13 ? 38 : 72;
-      score -= opponentInfo.opponentCloseToWin ? reserveCost * 0.3 : reserveCost;
+  // A high card can be worth spending when it makes the opponent pick up and
+  // leaves exactly one card that becomes playable after that pickup. Humans
+  // chose take-three in 106 of 111 high-pile pickup examples, so weight that
+  // likely response heavily and keep take-all as a small alternative.
+  const activeOpponents = state.players.filter(opponent => opponent.id !== playerId && !opponent.hasFinished);
+  const pickupReturnsTurnToAI = activeOpponents.length === 1;
+  if (remainingHand.length === 1 && pickupReturnsTurnToAI) {
+    const nextIndex = getNextPlayerIndex(state.players.findIndex(player => player.id === playerId), state.players);
+    const nextPlayer = state.players[nextIndex];
+    const forceProbability = nextPlayer
+      ? 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue)
+      : 0;
+    const pileAfterPlay = [...pile, ...cardsToPlay];
+    const takeOptions = getTakeOptions(pileAfterPlay, state.options);
+    const canPlayAfterTake = (takeCount: number) => {
+      const remainingPile = pileAfterPlay.slice(0, Math.max(1, pileAfterPlay.length - takeCount));
+      const newTop = remainingPile[remainingPile.length - 1]?.value ?? 0;
+      return remainingHand[0].value >= newTop;
+    };
+    if (takeOptions.canTake3) {
+      if (canPlayAfterTake(takeOptions.take3Count)) score += 185 * forceProbability * (takeOptions.canTakeAll ? 0.96 : 1);
+    }
+    if (takeOptions.canTakeAll && canPlayAfterTake(takeOptions.takeAllCount)) {
+      const takeAllWeight = takeOptions.canTake3 ? 0.04 : 1;
+      score += 185 * forceProbability * takeAllWeight;
     }
 
-    // A high card can be worth spending when it strands the opponent and
-    // leaves a playable final card after the likely pickup.
-    const activeOpponents = state.players.filter(opponent => opponent.id !== playerId && !opponent.hasFinished);
-    if (remainingHand.length === 1 && activeOpponents.length === 1) {
-      const nextIndex = getNextPlayerIndex(state.players.findIndex(player => player.id === playerId), state.players);
-      const nextPlayer = state.players[nextIndex];
-      const forceProbability = nextPlayer
-        ? 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue)
-        : 0;
-      const pileAfterPlay = [...pile, ...cardsToPlay];
-      const takeOptions = getTakeOptions(pileAfterPlay, state.options);
-      const canPlayAfterTake = (takeCount: number) => {
-        const remainingPile = pileAfterPlay.slice(0, Math.max(1, pileAfterPlay.length - takeCount));
-        const newTop = remainingPile[remainingPile.length - 1]?.value ?? 0;
-        return remainingHand[0].value >= newTop;
-      };
-      if (takeOptions.canTake3 && canPlayAfterTake(takeOptions.take3Count)) {
-        score += 185 * forceProbability * (takeOptions.canTakeAll ? 0.96 : 1);
-      }
-      if (takeOptions.canTakeAll && canPlayAfterTake(takeOptions.takeAllCount)) {
-        score += 185 * forceProbability * (takeOptions.canTake3 ? 0.04 : 1);
-      }
+    // A forced pickup also transfers our played high card to the opponent.
+    // Price that gift when tracking says a response is unlikely, unless the
+    // pickup is the line that lets us shed our final card immediately after.
+    const likelyTakeProbability = forceProbability;
+    const likelyTakeCount = takeOptions.canTake3 ? takeOptions.take3Count : takeOptions.takeAllCount;
+    const highCardsOffered = pileAfterPlay
+      .slice(-likelyTakeCount)
+      .filter(card => card.value >= 13)
+      .length;
+    const finalCardEscape = remainingHand.length === 1 && takeOptions.canTake3 &&
+      canPlayAfterTake(takeOptions.take3Count) && forceProbability >= 0.6;
+    if (!finalCardEscape) score -= 38 * likelyTakeProbability * highCardsOffered;
 
-      const likelyTakeCount = takeOptions.canTake3 ? takeOptions.take3Count : takeOptions.takeAllCount;
-      const highCardsOffered = pileAfterPlay.slice(-likelyTakeCount).filter(card => card.value >= 13).length;
-      const finalCardEscape = takeOptions.canTake3 && canPlayAfterTake(takeOptions.take3Count) && forceProbability >= 0.6;
-      if (!finalCardEscape) score -= 38 * forceProbability * highCardsOffered;
-      if (nextPlayer && remainingHand[0].value < playedValue) score -= 120 * (1 - forceProbability);
+    // If the opponent can answer, playing into that answer is risky unless the
+    // final card is still high enough to beat the response.
+    if (nextPlayer && remainingHand[0].value < playedValue) {
+      const answerProbability = 1 - forceProbability;
+      score -= 120 * answerProbability;
     }
   }
 
-  // Price all likely pickups that would transfer K/A cards, including cards
-  // already near the top of the pile. A K/A offered with three known or likely
-  // matching cards receives an extra completion penalty, larger for Aces.
+  // The expert demonstrations show that opponents frequently pick up a King
+  // or Ace when it is left on top of the pile. Price that exposure for
+  // discretionary high singles too, while leaving the final-card escape
+  // calculation above untouched. The learned rates are only used for the
+  // two-player ruleset represented by the demonstrations.
   if (remainingHand.length > 1 && state.players.length === 2) {
-    const validation = validatePlay(
-      cardsToPlay,
-      pile,
-      pile.length === 1 && pile[0].value === 9 && pile[0].suit === 'diamonds',
-      state.options,
-    );
-    if (!validation.valid || validation.continueTurn) return score;
-
     const playerIndex = state.players.findIndex(player => player.id === playerId);
     const nextIndex = getNextPlayerIndex(playerIndex, state.players);
     const nextPlayer = state.players[nextIndex];
     const pileAfterPlay = [...pile, ...cardsToPlay];
-    const nextTopValue = pileAfterPlay[pileAfterPlay.length - 1]?.value ?? 9;
     const takeOptions = getTakeOptions(pileAfterPlay, state.options);
     const takeCount = takeOptions.canTake3 ? takeOptions.take3Count : takeOptions.takeAllCount;
-    const offeredCards = pileAfterPlay.slice(-takeCount);
-    const highCardsOffered = offeredCards.filter(card => card.value >= 13).length;
+    const highCardsOffered = pileAfterPlay
+      .slice(-takeCount)
+      .filter(card => card.value >= 13)
+      .length;
 
     if (nextPlayer && highCardsOffered > 0) {
-      const forcedTakeProbability = 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, nextTopValue);
+      const forcedTakeProbability = 1 - probabilityOpponentCanAnswer(tracker, state, nextPlayer.id, playedValue);
       const demonstratedTakeRate = state.options.specialNinesRule &&
         state.options.allowTakeAllCards && state.options.fourOfAKindRule
-        ? getDemonstratedPickupRate(nextTopValue)
+        ? getDemonstratedHighPileTakeRate(playedValue as 13 | 14)
         : 0;
       const pickupProbability = Math.max(forcedTakeProbability, demonstratedTakeRate);
       const blockingMultiplier = opponentInfo.opponentCloseToWin ? 0.5 : 1;
-      const ownPlayer = state.players.find(player => player.id === playerId);
-      const earlyGameMultiplier = ownPlayer && ownPlayer.hand.length >= 8 && nextPlayer.hand.length >= 8 ? 1.2 : 1;
-      score -= 28 * pickupProbability * highCardsOffered * blockingMultiplier * earlyGameMultiplier;
-
-      if (state.options.fourOfAKindRule) {
-        const offeredByValue = new Map<number, number>();
-        for (const card of offeredCards) {
-          if (card.value >= 13) offeredByValue.set(card.value, (offeredByValue.get(card.value) ?? 0) + 1);
-        }
-        for (const [value, offeredCount] of offeredByValue) {
-          const missingCards = Math.max(1, 4 - offeredCount);
-          const completionProbability = probabilityOpponentHasAtLeast(
-            tracker,
-            state,
-            nextPlayer.id,
-            value,
-            missingCards,
-          );
-          const aceMultiplier = value === 14 ? 1.25 : 1;
-          score -= 320 * pickupProbability * completionProbability * aceMultiplier * earlyGameMultiplier;
-        }
-      }
+      score -= 28 * pickupProbability * highCardsOffered * blockingMultiplier;
     }
   }
 
@@ -932,14 +863,14 @@ export function getAIMoveCandidates(state: GameState, playerId: number, continui
   });
 }
 
-export function getHumanImitationMove(state: GameState, playerId: number, style: HumanImitationStyle = 'weighted'): {
+export function getHumanImitationMove(state: GameState, playerId: number): {
   move: AIMove;
   usedDemonstration: boolean;
   demonstrationScore: number;
 } {
   const player = state.players.find(candidate => candidate.id === playerId);
   const candidates = getAIMoveCandidates(state, playerId);
-  const scores = getHumanDemonstrationScores(state, playerId, candidates, style);
+  const scores = getHumanDemonstrationScores(state, playerId, candidates);
   let bestCandidate: AIMove | null = null;
   let bestScore = -Infinity;
   for (const candidate of candidates) {
@@ -1235,10 +1166,7 @@ function sampleHiddenHands(state: GameState, playerId: number): GameState {
 function chooseRolloutMove(state: GameState, playerId: number): AIMove {
   const player = state.players.find(candidate => candidate.id === playerId);
   if (!player || player.hasFinished || player.hand.length === 0) return { type: 'endTurn', cards: [] };
-  if (!player.isAI) {
-    const imitationStyle = (player as Player & { humanImitationStyle?: HumanImitationStyle }).humanImitationStyle ?? 'weighted';
-    return getHumanImitationMove(state, playerId, imitationStyle).move;
-  }
+  if (!player.isAI) return getHumanImitationMove(state, playerId).move;
 
   const candidates = getAIMoveCandidates(state, playerId);
   if (candidates.length === 0) return { type: 'endTurn', cards: [] };
@@ -1391,7 +1319,6 @@ function getHardAIMove(state: GameState, playerId: number, searchFuture = true):
     )
   );
   const candidatesToScore = preferredCandidates.length > 0 ? preferredCandidates : candidates;
-  const demonstrationScores = getHumanDemonstrationScores(state, playerId, candidatesToScore);
   const baseScored = candidatesToScore.map(c => {
     let strategicScore: number;
     if (c.type === 'play') {
@@ -1413,7 +1340,7 @@ function getHardAIMove(state: GameState, playerId: number, searchFuture = true):
       strategicScore = evaluateTakeMove(takeCount, hand, pile, state, playerId);
     }
 
-    const humanDemonstrationScore = demonstrationScores.get(getTrainingMoveKey(c)) ?? 0;
+    const humanDemonstrationScore = getHumanDemonstrationScore(state, playerId, c);
     return { c, score: strategicScore + evaluateCandidate(state, playerId, c) + humanDemonstrationScore };
   });
   // Spend search time on the strongest tactical alternatives, while
@@ -1675,10 +1602,6 @@ export function getContinueTurnMove(
   if (!possiblePlays || possiblePlays.length === 0) return { type: 'endTurn', cards: [] };
 
   const hardTracker = difficulty === 'hard' ? buildOpponentCardTracker(state, playerId) : undefined;
-  const continuationCandidates = possiblePlays.map(cards => ({ type: 'play' as const, cards }));
-  const demonstrationScores = difficulty === 'hard'
-    ? getHumanDemonstrationScores(state, playerId, continuationCandidates)
-    : new Map<string, number>();
   let best: Card[] | null = null;
   let bestScore = -Infinity;
   for (const play of possiblePlays) {
@@ -1688,7 +1611,7 @@ export function getContinueTurnMove(
     if (!validation.valid) continue;
     const score = evaluatePlayMove(play, hand, pile, state, playerId) +
       (difficulty === 'hard' ? evaluateHighCardControl(play, hand, pile, state, playerId, hardTracker) : 0) +
-      (difficulty === 'hard' ? demonstrationScores.get(getTrainingMoveKey({ type: 'play', cards: play })) ?? 0 : 0);
+      (difficulty === 'hard' ? getHumanDemonstrationScore(state, playerId, { type: 'play', cards: play }) : 0);
     if (score > bestScore) {
       bestScore = score;
       best = play;
